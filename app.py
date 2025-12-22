@@ -2,459 +2,454 @@ import streamlit as st
 from openai import OpenAI
 from audio_recorder_streamlit import audio_recorder
 import streamlit.components.v1 as components
+from supabase import create_client, Client  # 👈 이 부분이 포함되어야 합니다!
 import json
 import random
 import time
+import datetime
+from datetime import date
 
 # ==========================================
 # 1. 설정 및 초기화
 # ==========================================
-# ⚠️ [중요] 여기에 발급받은 OpenAI API Key를 입력하세요.
+st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
+# Secrets에서 키 가져오기 (로컬/클라우드 공용)
 try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
+    supabase_url = st.secrets["SUPABASE_URL"]
+    supabase_key = st.secrets["SUPABASE_KEY"]
 except Exception:
-    # 로컬(내 컴퓨터)에서 테스트할 때를 위한 예외 처리 (secrets.toml이 없을 경우 등)
-    openai_api_key = "여기에_키를_넣지_마세요_로컬은_secrets_toml로_관리합니다" 
+    st.error("❌ API 키 설정이 필요합니다. secrets.toml 파일이나 Streamlit Cloud Secrets를 확인하세요.")
+    st.stop()
 
+# 클라이언트 초기화
 client = OpenAI(api_key=openai_api_key)
+supabase: Client = create_client(supabase_url, supabase_key)
 
-st.set_page_config(page_title="중등 영어 스파르타", layout="centered")
-
-# 세션 상태(Session State) 초기화
-if "user_level" not in st.session_state:
-    st.session_state.user_level = None 
-if "mission" not in st.session_state:
-    st.session_state.mission = None
-if "step" not in st.session_state:
-    st.session_state.step = "learning" # learning -> practice -> drill
-
-# 단어 발음 데이터 저장소
-if "word_audios" not in st.session_state:
-    st.session_state.word_audios = {}
-
-# 퀴즈(드릴) 상태 관리 저장소
+# 세션 상태 초기화
+if "user_level" not in st.session_state: st.session_state.user_level = None 
+if "mission" not in st.session_state: st.session_state.mission = None
+if "step" not in st.session_state: st.session_state.step = "learning"
+if "word_audios" not in st.session_state: st.session_state.word_audios = {}
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
-        "phase": "ready",    # ready -> mc(객관식) -> writing(주관식) -> end
-        "current_idx": 0,
-        "shuffled_words": [],
-        "wrong_words": [],   # 틀린 단어를 모으는 리스트
-        "loop_count": 1      # 반복 회차 (1회차, 2회차...)
+        "phase": "ready", "current_idx": 0, 
+        "shuffled_words": [], "wrong_words": [], "loop_count": 1
     }
 
 # ==========================================
-# 2. 유틸리티 및 AI 함수
+# 2. Supabase DB 관리 함수 (이 함수들이 꼭 있어야 합니다!)
 # ==========================================
 
+def get_user_data(user_id):
+    """사용자 정보 가져오기"""
+    response = supabase.table("users").select("*").eq("user_id", user_id).execute()
+    if response.data:
+        return response.data[0]
+    return None
+
+def create_new_user(user_id):
+    """신규 사용자 생성"""
+    data = {
+        "user_id": user_id,
+        "current_level": None,
+        "total_complete_count": 0,
+        "last_test_count": 0,
+        "streak": 0,
+        "last_visit_date": None
+    }
+    supabase.table("users").insert(data).execute()
+
+def update_attendance(user_id):
+    """출석 체크 및 Streak 로직 (경고/격려 메시지 반환)"""
+    user = get_user_data(user_id)
+    if not user:
+        create_new_user(user_id)
+        user = get_user_data(user_id)
+    
+    today_str = date.today().isoformat()
+    last_visit_str = user.get("last_visit_date")
+    current_streak = user.get("streak", 0)
+    
+    msg = ""
+    new_streak = current_streak
+    
+    if last_visit_str == today_str:
+        # 오늘 이미 방문함
+        msg = f"오늘도 오셨군요! 현재 {current_streak}일 연속 학습 중입니다. 🔥"
+    else:
+        # 날짜 차이 계산
+        if last_visit_str:
+            last_date = datetime.date.fromisoformat(last_visit_str)
+            delta = (date.today() - last_date).days
+            
+            if delta == 1:
+                # 어제 오고 오늘 옴 (연속)
+                new_streak += 1
+                msg = f"대단해요! {new_streak}일째 연속 출석 중입니다! 🚀"
+            else:
+                # 결석함 (초기화)
+                new_streak = 1
+                msg = f"앗! {delta-1}일 결석하여 스트릭이 초기화되었습니다 ㅠㅠ 다시 시작해봐요! 💪"
+        else:
+            # 첫 방문
+            new_streak = 1
+            msg = "환영합니다! 오늘부터 1일! 🎉"
+            
+        # DB 업데이트
+        supabase.table("users").update({
+            "last_visit_date": today_str,
+            "streak": new_streak
+        }).eq("user_id", user_id).execute()
+        
+    return new_streak, msg
+
+def update_level_and_test_log(user_id, new_level):
+    """레벨 테스트 후 결과 저장"""
+    user = get_user_data(user_id)
+    current_total = user.get("total_complete_count", 0)
+    
+    supabase.table("users").update({
+        "current_level": new_level,
+        "last_test_count": current_total # 현재 완료 횟수를 기준점으로 저장
+    }).eq("user_id", user_id).execute()
+
+def complete_daily_mission(user_id):
+    """학습 완료 처리 (+1 카운트)"""
+    # 1. users 테이블 카운트 증가
+    user = get_user_data(user_id)
+    new_count = user.get("total_complete_count", 0) + 1
+    supabase.table("users").update({"total_complete_count": new_count}).eq("user_id", user_id).execute()
+    
+    # 2. study_logs에 기록
+    supabase.table("study_logs").insert({
+        "user_id": user_id,
+        "study_date": date.today().isoformat(),
+        "completed_at": datetime.datetime.now().isoformat()
+    }).execute()
+
+def save_wrong_word_db(user_id, word_obj):
+    """틀린 단어 DB 저장 (나만의 단어장)"""
+    res = supabase.table("wrong_words").select("*").eq("user_id", user_id).eq("word", word_obj['en']).execute()
+    
+    if res.data:
+        row_id = res.data[0]['id']
+        new_cnt = res.data[0]['wrong_count'] + 1
+        supabase.table("wrong_words").update({"wrong_count": new_cnt}).eq("id", row_id).execute()
+    else:
+        supabase.table("wrong_words").insert({
+            "user_id": user_id,
+            "word": word_obj['en'],
+            "meaning": word_obj['ko'],
+            "wrong_count": 1
+        }).execute()
+
+# ==========================================
+# 3. AI 및 유틸리티 함수
+# ==========================================
 def set_focus_js():
-    """
-    [기능] 화면이 로드될 때 텍스트 입력창(text input)에 
-    자동으로 커서를 위치시키는 JavaScript를 주입합니다.
-    """
     components.html(
-        """
-        <script>
-            var input = window.parent.document.querySelector("input[type=text]");
-            if (input) {
-                input.focus();
-            }
-        </script>
-        """,
+        """<script>var input = window.parent.document.querySelector("input[type=text]"); if (input) { input.focus(); }</script>""",
         height=0,
     )
 
 def generate_tts(text):
-    """OpenAI TTS 모델을 사용하여 텍스트를 음성으로 변환"""
     try:
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text
-        )
+        response = client.audio.speech.create(model="tts-1", voice="alloy", input=text)
         return response.content
-    except Exception as e:
-        st.error(f"TTS 생성 오류: {e}")
-        return None
+    except: return None
 
-def run_level_test(user_audio_text):
-    """레벨 테스트 결과 분석 (Low/Mid/High)"""
-    prompt = """
-    당신은 중학교 영어 교사입니다. 학생의 답변을 보고 실력을 평가하세요.
-    - Low: 영어를 거의 못하거나 단어만 나열함.
-    - Mid: 문장을 만들 수 있으나 문법 오류가 있음.
-    - High: 자연스러운 문장 구사 가능.
-    결과는 오직 'Low', 'Mid', 'High' 중 하나만 출력하세요.
-    """
-    response = client.chat.completions.create(
+def run_level_test_ai(text):
+    prompt = "학생의 영어 답변을 보고 실력을 'Low', 'Mid', 'High' 중 하나로만 평가하세요."
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"학생 답변: {user_audio_text}"}
-        ]
+        messages=[{"role":"system", "content":prompt}, {"role":"user", "content":text}]
     )
-    return response.choices[0].message.content.strip()
+    return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
-    """레벨에 맞는 커리큘럼(단어 20개, 문장 20개) 생성"""
     prompt = f"""
-    당신은 대한민국 중학교 영어 교육 전문가입니다. 학생 레벨 '{level}'에 맞는 오늘의 미션을 JSON으로 만드세요.
-    
-    [필수 요구사항]
-    1. **문법 설명은 반드시 100% 한국어로**, 중학생이 이해하기 쉽게 작성하세요.
-    2. 단어는 20개이며, 영어 철자와 한국어 뜻을 포함하세요.
-    3. **실전 연습 문장(practice_sentences)을 20개** 만드세요.
-       - 오늘의 문법과 단어를 활용한 문장이어야 합니다.
-       - 'hint_structure': 문장의 구조나 포함될 주요 단어를 제시 (예: 평서문 / I, go, school)
-       - 'hint_grammar': 정답을 알려주지 말고 문법적 힌트만 제공 (예: 주어가 3인칭 단수입니다.)
-       - 'en': 정답 영어 문장
-
-    형식:
-    {{
-        "topic": "주제",
-        "grammar": {{"title": "문법 제목", "description": "설명", "rule": "공식", "example": "예문"}},
-        "words": [ {{"en": "apple", "ko": "사과"}}, ... ],
-        "practice_sentences": [
-            {{
-                "ko": "나는 학교에 갑니다.", 
-                "en": "I go to school.",
-                "hint_structure": "...",
-                "hint_grammar": "..."
-            }},
-            ... (총 20개)
-        ]
-    }}
-    오직 JSON 데이터만 출력하세요.
+    중학생 레벨 '{level}'용 영어 학습 JSON 생성.
+    1. 문법(한글설명), 2. 단어 20개, 3. 문장 20개
+    Output JSON: {{ "topic": "...", "grammar": {{...}}, "words": [{{...}}], "practice_sentences": [{{...}}] }}
     """
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": prompt}],
+    res = client.chat.completions.create(
+        model="gpt-4o-mini", 
+        messages=[{"role":"system", "content":prompt}],
         response_format={"type": "json_object"}
     )
-    return json.loads(response.choices[0].message.content)
+    return json.loads(res.choices[0].message.content)
 
 def transcribe_audio(audio_bytes):
-    """Whisper 모델을 사용하여 음성을 텍스트로 변환"""
     import io
-    audio_file = io.BytesIO(audio_bytes)
-    audio_file.name = "input.wav"
-    transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-    return transcript.text
+    f = io.BytesIO(audio_bytes)
+    f.name = "input.wav"
+    return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-def evaluate_practice(target_sentence, user_input):
-    """
-    연습 문제 채점 및 피드백 생성
-    틀렸을 경우 '왜 틀렸는지'를 상세히 설명하도록 요청
-    """
-    prompt = f"""
-    목표 문장: "{target_sentence}"
-    학생 답안: "{user_input}"
-    
-    당신은 친절한 중학교 영어 선생님입니다.
-    1. 의미와 문법이 90% 이상 일치하면 맨 첫 줄에 'PASS'라고 적으세요.
-    2. 틀렸다면 맨 첫 줄에 'FAIL'이라고 적으세요.
-    3. **FAIL인 경우, 반드시 한국어로 구체적인 피드백을 주세요.**
-       - 어떤 부분이 틀렸는지 (시제, 철자, 단어 선택 등) 설명하세요.
-       - 정답 문장을 한 번 더 보여주세요.
-    """
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": prompt}]
-    )
-    return response.choices[0].message.content
+def evaluate_practice(target, user_input):
+    prompt = f"목표: '{target}', 답변: '{user_input}'. 의미 일치 시 PASS, 아니면 FAIL. FAIL시 구체적 피드백(한글)."
+    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
+    return res.choices[0].message.content
 
 # ==========================================
-# 3. 화면 구성 (UI)
+# 4. 화면 구성 (메인 로직)
 # ==========================================
-
 st.title("🏫 AI 중학 영어 스파르타")
 
-# [Phase 0] 레벨 테스트 (친절한 안내 적용)
-if st.session_state.user_level is None:
+# 사이드바: 로그인 & 정보 (DB 버전 필수)
+with st.sidebar:
+    st.header("🔑 로그인")
+    user_id = st.text_input("아이디(ID)", value="student1")
+    
+    if user_id:
+        # 출석 체크 및 DB 로드
+        streak, msg = update_attendance(user_id)
+        user_data = get_user_data(user_id)
+        
+        st.divider()
+        st.metric("🔥 연속 학습", f"{streak}일")
+        
+        if "초기화" in msg:
+            st.error(msg)
+        else:
+            st.success(msg)
+            
+        total_cnt = user_data.get('total_complete_count', 0)
+        st.info(f"🏆 누적 완료: {total_cnt}회")
+        
+    else:
+        st.warning("아이디를 입력해주세요.")
+        st.stop()
+
+# ==========================================
+# 레벨 테스트 여부 판단 로직 (DB 기반)
+# ==========================================
+should_test = False
+current_level = user_data.get('current_level')
+total_complete = user_data.get('total_complete_count', 0)
+last_test_cnt = user_data.get('last_test_count', 0)
+
+# 1. 신규 유저
+if current_level is None:
+    should_test = True
+    st.info("👋 처음 오셨군요! 레벨 테스트를 진행합니다.")
+
+# 2. 5회 완료 주기 체크 (누적 - 마지막테스트 >= 5)
+elif (total_complete - last_test_cnt) >= 5:
+    should_test = True
+    st.warning(f"📅 학습 {total_complete - last_test_cnt}회 완료! 정기 레벨 점검 시간입니다.")
+
+# ==========================================
+# Phase 0: 레벨 테스트
+# ==========================================
+if should_test:
     st.subheader("📝 레벨 테스트")
-    st.info("AI 선생님의 질문을 듣고 편안하게 대답해 보세요.")
+    st.markdown("편안하게 답변해주세요. 단어만 말해도 됩니다!")
     
-    question_text = "What do you usually do on weekends?"
+    q_text = "What do you usually do on weekends?"
+    st.markdown(f"**Q. {q_text}** (주말에 보통 뭐 해요?)")
     
-    # 질문 섹션
-    st.markdown(f"### 🎙️ Q. {question_text}")
-    st.caption("해석: 주말에 보통 무엇을 하시나요?") # 한글 해석 추가
-    
-    # 팁 제공 (심리적 장벽 낮추기)
-    with st.expander("💡 답변 팁 보기 (클릭)", expanded=True):
+    # 팁 제공
+    with st.expander("💡 답변 팁 보기", expanded=True):
         st.markdown("""
-        - 완벽한 문장이 아니어도 괜찮아요.
-        - **"Game"**, **"Sleep"** 처럼 **단어만 말해도 됩니다!**
+        - **"Game"**, **"Sleep"** 처럼 단어만 말해도 됩니다.
         - 편안하게 녹음 버튼을 눌러주세요.
         """)
-
-    # TTS 재생
-    if "level_test_audio" not in st.session_state:
-        st.session_state.level_test_audio = generate_tts(question_text)
-    if st.session_state.level_test_audio:
-        st.audio(st.session_state.level_test_audio, format="audio/mp3")
-
-    # 녹음기
-    audio_bytes = audio_recorder(text="", recording_color="#e8b62c", neutral_color="#6aa36f", key="level_rec")
     
-    if audio_bytes:
-        with st.spinner("AI가 분석 중입니다..."):
-            text = transcribe_audio(audio_bytes)
-            st.write(f"🗣️ 당신의 답변: **{text}**")
-            
-            if len(text) < 2:
-                st.warning("잘 안 들렸어요. 다시 한 번 말씀해 주세요! (단어 하나라도 좋아요)")
+    if st.button("🔊 질문 듣기"):
+        tts = generate_tts(q_text)
+        if tts: st.audio(tts, format='audio/mp3')
+        
+    aud = audio_recorder(text="", key="lvl_rec", neutral_color="#6aa36f", recording_color="#e8b62c")
+    if aud:
+        with st.spinner("분석 중..."):
+            txt = transcribe_audio(aud)
+            st.write(f"답변: {txt}")
+            if len(txt) < 2:
+                st.warning("잘 안 들렸어요.")
             else:
-                level = run_level_test(text)
-                st.session_state.user_level = level
+                lvl = run_level_test_ai(txt)
+                update_level_and_test_log(user_id, lvl) # DB 저장
                 st.balloons()
-                st.success(f"분석 완료! 당신에게 딱 맞는 **[{level}]** 코스를 준비했습니다.")
+                st.success(f"결과: **[{lvl}]** 레벨로 설정되었습니다!")
                 time.sleep(2)
                 st.rerun()
 
-# [Phase 1~3] 메인 학습 루틴
-else:
-    # 미션 데이터 생성 (없을 경우)
-    if st.session_state.mission is None:
-        with st.spinner(f"Lv.{st.session_state.user_level} 맞춤 커리큘럼 생성 중..."):
-            st.session_state.mission = generate_curriculum(st.session_state.user_level)
+# ==========================================
+# Phase 1~3: 메인 학습
+# ==========================================
+elif current_level:
+    st.session_state.user_level = current_level
     
+    if not st.session_state.mission:
+        with st.spinner("오늘의 미션 생성 중..."):
+            st.session_state.mission = generate_curriculum(current_level)
+            
     mission = st.session_state.mission
     st.header(f"Topic: {mission['topic']}")
+    st.caption(f"Level: {current_level}")
 
-    # ===============================================
-    # Step 1. 학습 모드 (Learning)
-    # ===============================================
+    # Step 1. Learning
     if st.session_state.step == "learning":
         st.markdown("### 📖 Step 1. 오늘의 학습")
         
-        # [수정] 발음 파일 미리 생성 (클릭 시 1회 재생용)
         if not st.session_state.word_audios:
-            progress_bar = st.progress(0, text="발음 파일을 준비 중입니다...")
-            total_words = len(mission['words'])
+            pb = st.progress(0, "발음 준비 중...")
+            for i, w in enumerate(mission['words']):
+                st.session_state.word_audios[i] = generate_tts(w['en'])
+                pb.progress((i+1)/20)
+            pb.empty()
             
-            for i, word in enumerate(mission['words']):
-                # 반복 없이 단어만 1회 생성
-                audio_data = generate_tts(word['en'])
-                st.session_state.word_audios[i] = audio_data
-                progress_bar.progress((i + 1) / total_words)
-            
-            progress_bar.empty()
-            st.toast("학습 준비 완료! 🎧")
-
-        # 문법 카드
         with st.container(border=True):
-            st.subheader(f"📘 문법: {mission['grammar']['title']}")
-            st.markdown(f"{mission['grammar']['description']}")
-            st.info(f"**규칙:** {mission['grammar'].get('rule', '')}")
-            st.markdown(f"**예시:** *{mission['grammar']['example']}*")
+            gr = mission['grammar']
+            st.subheader(f"📘 {gr['title']}")
+            st.markdown(gr['description'])
+            st.info(f"공식: {gr.get('rule','')}")
+            st.markdown(f"예시: *{gr['example']}*")
+            
+        for i, w in enumerate(mission['words']):
+            c1, c2 = st.columns([4,1])
+            with c1: st.markdown(f"**{i+1}. {w['en']}** ({w['ko']})")
+            with c2: 
+                if i in st.session_state.word_audios: st.audio(st.session_state.word_audios[i], format='audio/mp3')
 
-        # 단어 리스트
-        st.subheader("🔥 필수 단어 20")
-        for i, word in enumerate(mission['words']):
-            col_text, col_btn = st.columns([4, 1])
-            with col_text:
-                st.markdown(f"**{i+1}. {word['en']}** ({word['ko']})")
-            with col_btn:
-                # 미리 생성된 오디오 재생
-                if i in st.session_state.word_audios:
-                    st.audio(st.session_state.word_audios[i], format="audio/mp3")
-        
-        st.divider()
-        if st.button("문장 만들기 연습하러 가기 👉", type="primary"):
+        if st.button("연습하러 가기 👉", type="primary"):
             st.session_state.step = "practice"
             st.rerun()
 
-    # ===============================================
-    # Step 2. 문장 만들기 연습 (Guided Practice)
-    # ===============================================
+    # Step 2. Practice
     elif st.session_state.step == "practice":
-        st.markdown("### ✍️ Step 2. 문장 만들기 연습 (20문항)")
+        st.markdown("### ✍️ Step 2. 문장 만들기")
         
-        # 상단 문법 리마인드
-        grammar = mission['grammar']
+        # 문법 리마인드
         with st.container(border=True):
-            st.markdown(f"**💡 핵심 문법:** {grammar['title']}")
-            st.caption(f"공식: {grammar.get('rule', '')}")
+            gr = mission['grammar']
+            st.markdown(f"**핵심 문법:** {gr['title']}")
+            st.caption(gr.get('rule', ''))
 
-        sentences = mission['practice_sentences']
-        for idx, q in enumerate(sentences):
+        for idx, q in enumerate(mission['practice_sentences']):
             st.divider()
             st.markdown(f"**Q{idx+1}. {q['ko']}**")
-            
-            with st.expander("🕵️ 힌트 보기"):
-                st.markdown(f"- **구조:** {q.get('hint_structure','')}")
-                st.markdown(f"- **문법:** {q.get('hint_grammar','')}")
-            
-            col_mic, col_kbd = st.columns([1, 2])
-            user_response = None
-            
-            # 1. 음성 입력
-            with col_mic:
-                audio_bytes = audio_recorder(text="", key=f"rec_{idx}", icon_size="lg")
-                if audio_bytes: 
-                    user_response = transcribe_audio(audio_bytes)
-            
-            # 2. 텍스트 입력
-            with col_kbd:
-                with st.form(key=f"form_{idx}"):
-                    txt = st.text_input("정답 입력", key=f"txt_{idx}")
-                    if st.form_submit_button("제출") and txt: 
-                        user_response = txt
-
-            # 채점 및 피드백 로직
-            if user_response:
-                st.write(f"📝 **내 답안:** {user_response}")
+            with st.expander("힌트"):
+                st.write(f"{q.get('hint_structure','')} / {q.get('hint_grammar','')}")
                 
-                # 1차: 단순 문자열 비교 (정확도 100%인 경우)
-                if user_response.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
-                     st.success("완벽합니다! 정답입니다. 🎉")
+            c_mic, c_txt = st.columns([1,2])
+            user_res = None
+            with c_mic:
+                aud = audio_recorder(text="", key=f"p_rec_{idx}")
+                if aud: user_res = transcribe_audio(aud)
+            with c_txt:
+                with st.form(f"p_form_{idx}"):
+                    inp = st.text_input("입력", key=f"p_inp_{idx}")
+                    if st.form_submit_button("제출"): user_res = inp
+            
+            if user_res:
+                st.write(f"답안: {user_res}")
+                if user_res.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
+                    st.success("정답! 🎉")
                 else:
-                    # 2차: AI 정밀 채점
-                    with st.spinner("AI 선생님이 채점 중입니다..."):
-                        res = evaluate_practice(q['en'], user_response)
-                    
-                    if res.startswith("PASS"):
-                        st.success("통과! 잘 하셨어요. 👍")
-                        st.caption(res.replace("PASS", "").strip())
+                    with st.spinner("채점..."):
+                        res = evaluate_practice(q['en'], user_res)
+                    if "PASS" in res:
+                        st.success("통과! 👍")
+                        st.caption(res.replace("PASS",""))
                     else:
-                        st.error("틀렸습니다. ❌")
-                        # [요청 반영] 틀린 이유를 상세히 출력
-                        feedback_msg = res.replace("FAIL", "").strip()
-                        st.warning(f"💡 **선생님 조언:**\n\n{feedback_msg}")
-
-        st.divider()
-        st.markdown("연습을 모두 마쳤나요?")
-        if st.button("⚔️ 실전 퀴즈 (Drill) 도전하기", type="primary"):
+                        st.error("오답 ❌")
+                        st.warning(res.replace("FAIL",""))
+                        
+        if st.button("실전 퀴즈 도전 ⚔️", type="primary"):
             st.session_state.step = "drill"
-            # 퀴즈 상태 초기화
             st.session_state.quiz_state = {
-                "phase": "ready",
-                "current_idx": 0,
-                "shuffled_words": random.sample(mission['words'], len(mission['words'])), # 처음엔 전체 단어
-                "wrong_words": [],
-                "loop_count": 1
+                "phase": "ready", "current_idx": 0,
+                "shuffled_words": random.sample(mission['words'], 20),
+                "wrong_words": [], "loop_count": 1
             }
             st.rerun()
 
-    # ===============================================
-    # Step 3. 실전 드릴 (무한 오답 루프 시스템)
-    # ===============================================
+    # Step 3. Drill (DB 저장 기능 포함)
     elif st.session_state.step == "drill":
-        quiz_data = st.session_state.quiz_state
-        words_list = quiz_data["shuffled_words"]
-        total_q = len(words_list)
+        qs = st.session_state.quiz_state
+        words = qs["shuffled_words"]
+        total = len(words)
         
-        st.markdown(f"### ⚔️ Step 3. 실전 테스트 (Loop {quiz_data['loop_count']})")
+        st.markdown(f"### ⚔️ Step 3. 실전 테스트 ({qs['loop_count']}회차)")
         
-        # [Phase: Ready] 준비 화면
-        if quiz_data["phase"] == "ready":
-            st.info(f"이번 라운드 도전 단어: **{total_q}개**")
-            
-            if quiz_data['loop_count'] > 1:
-                st.error(f"🚨 틀린 단어들만 모아서 다시 퀴즈를 봅니다! (재도전 {quiz_data['loop_count']}회차)")
-            else:
-                st.markdown("객관식 문제(뜻 맞추기)와 주관식 문제(철자 쓰기)가 이어집니다.")
-
-            if st.button("테스트 시작! (Start)"):
-                quiz_data["phase"] = "mc"
+        if qs["phase"] == "ready":
+            st.info(f"문제 수: {total}개")
+            if qs['loop_count'] > 1: st.error("틀린 문제 재도전!")
+            if st.button("시작"):
+                qs["phase"] = "mc"
                 st.rerun()
-
-        # [Phase 1: 객관식 퀴즈]
-        elif quiz_data["phase"] == "mc":
-            st.subheader(f"Round 1. 객관식 ({quiz_data['current_idx'] + 1}/{total_q})")
+                
+        elif qs["phase"] == "mc":
+            st.subheader(f"객관식 ({qs['current_idx']+1}/{total})")
+            target = words[qs["current_idx"]]
+            st.markdown(f"## {target['en']}")
             
-            target_word = words_list[quiz_data["current_idx"]]
-            st.markdown(f"## 🔤 **{target_word['en']}**")
-            
-            # 보기 생성 로직
-            correct_ans = target_word['ko']
-            all_meanings = [w['ko'] for w in mission['words']]
-            distractors = [m for m in all_meanings if m != correct_ans]
-            # 보기가 부족할 경우를 대비해 확장
-            if len(distractors) < 3: distractors = distractors * 3 
-            
-            opts = random.sample(distractors, 3) + [correct_ans]
+            opts = [target['ko']]
+            while len(opts) < 4:
+                r = random.choice(mission['words'])['ko']
+                if r not in opts: opts.append(r)
             random.shuffle(opts)
-
-            with st.form(key=f"mc_{quiz_data['loop_count']}_{quiz_data['current_idx']}"):
-                choice = st.radio("알맞은 뜻을 고르세요:", opts)
-                submit = st.form_submit_button("확인")
-                
-                if submit:
-                    if choice == correct_ans:
-                        st.success("정답! ⭕")
-                    else:
-                        st.error(f"땡! ❌ (정답: {correct_ans})")
-                        # 틀린 단어 리스트에 추가 (중복 방지)
-                        if target_word not in quiz_data["wrong_words"]:
-                            quiz_data["wrong_words"].append(target_word)
-
-                    time.sleep(0.8) # 결과 확인용 딜레이
-                    
-                    # 다음 문제 or 다음 단계 이동
-                    if quiz_data["current_idx"] + 1 < total_q:
-                        quiz_data["current_idx"] += 1
-                        st.rerun()
-                    else:
-                        # 객관식 종료 -> 주관식 준비
-                        quiz_data["phase"] = "writing"
-                        quiz_data["current_idx"] = 0
-                        # 주관식에서는 순서를 한 번 더 섞어줌
-                        random.shuffle(quiz_data["shuffled_words"]) 
-                        st.rerun()
-
-        # [Phase 2: 주관식 쓰기 퀴즈]
-        elif quiz_data["phase"] == "writing":
-            st.subheader(f"Round 2. 철자 쓰기 ({quiz_data['current_idx'] + 1}/{total_q})")
             
-            # [요청 반영] 텍스트 박스 자동 포커스
-            set_focus_js()
-
-            target_word = quiz_data["shuffled_words"][quiz_data["current_idx"]]
-            st.markdown(f"## 🇰🇷 **{target_word['ko']}**")
-            st.caption("위 뜻을 가진 영어 단어를 입력하고 엔터(Enter)를 치세요.")
-
-            with st.form(key=f"wr_{quiz_data['loop_count']}_{quiz_data['current_idx']}"):
-                # key를 매번 다르게 주어 리셋 효과 & 자동 포커스 타겟팅
-                user_input = st.text_input("영어 단어 입력", key=f"input_{quiz_data['loop_count']}_{quiz_data['current_idx']}") 
-                submit = st.form_submit_button("제출")
-                
-                if submit:
-                    if user_input.strip().lower() == target_word['en'].lower():
-                        st.success("Correct! ⭕")
+            with st.form(f"mc_{qs['loop_count']}_{qs['current_idx']}"):
+                sel = st.radio("뜻 선택", opts)
+                if st.form_submit_button("확인"):
+                    if sel == target['ko']: st.success("정답 ⭕")
                     else:
-                        st.error(f"Wrong! ❌ (정답: {target_word['en']})")
-                        # 틀린 단어 추가
-                        if target_word not in quiz_data["wrong_words"]:
-                            quiz_data["wrong_words"].append(target_word)
-
-                    time.sleep(0.8)
-                    
-                    if quiz_data["current_idx"] + 1 < total_q:
-                        quiz_data["current_idx"] += 1
+                        st.error("오답 ❌")
+                        if target not in qs["wrong_words"]: 
+                            qs["wrong_words"].append(target)
+                            save_wrong_word_db(user_id, target) # DB 저장
+                            
+                    time.sleep(0.5)
+                    if qs["current_idx"]+1 < total:
+                        qs["current_idx"] += 1
                         st.rerun()
                     else:
-                        # [핵심 로직] 모든 라운드 종료 후 판단
-                        if len(quiz_data["wrong_words"]) > 0:
-                            # 틀린 문제가 있으면 -> 해당 단어들로만 구성된 새로운 루프 시작
-                            quiz_data["shuffled_words"] = quiz_data["wrong_words"][:] # 복사
-                            quiz_data["wrong_words"] = [] # 오답통 초기화
-                            quiz_data["current_idx"] = 0
-                            quiz_data["phase"] = "ready" # 다시 준비 화면으로
-                            quiz_data["loop_count"] += 1
+                        qs["phase"] = "writing"
+                        qs["current_idx"] = 0
+                        random.shuffle(qs["shuffled_words"])
+                        st.rerun()
+                        
+        elif qs["phase"] == "writing":
+            st.subheader(f"주관식 ({qs['current_idx']+1}/{total})")
+            set_focus_js()
+            target = qs["shuffled_words"][qs["current_idx"]]
+            st.markdown(f"## {target['ko']}")
+            
+            with st.form(f"wr_{qs['loop_count']}_{qs['current_idx']}"):
+                inp = st.text_input("영어 단어 입력")
+                if st.form_submit_button("제출"):
+                    if inp.strip().lower() == target['en'].lower(): st.success("정답 ⭕")
+                    else:
+                        st.error("오답 ❌")
+                        if target not in qs["wrong_words"]:
+                            qs["wrong_words"].append(target)
+                            save_wrong_word_db(user_id, target) # DB 저장
+                            
+                    time.sleep(0.5)
+                    if qs["current_idx"]+1 < total:
+                        qs["current_idx"] += 1
+                        st.rerun()
+                    else:
+                        if qs["wrong_words"]:
+                            qs["shuffled_words"] = qs["wrong_words"][:]
+                            qs["wrong_words"] = []
+                            qs["current_idx"] = 0
+                            qs["phase"] = "ready"
+                            qs["loop_count"] += 1
                             st.rerun()
                         else:
-                            # 오답이 하나도 없으면 -> 최종 종료
-                            quiz_data["phase"] = "end"
+                            qs["phase"] = "end"
                             st.rerun()
-
-        # [Phase: End] 최종 완료 화면
-        elif quiz_data["phase"] == "end":
+                            
+        elif qs["phase"] == "end":
             st.balloons()
-            st.title("🏆 미션 클리어!")
-            st.success(f"축하합니다! 총 {quiz_data['loop_count']}번의 루프 끝에 모든 단어를 마스터했습니다.")
+            st.success("🎉 오늘의 학습 완료!")
             
-            if st.button("처음부터 다시 학습하기 (Reset All)"):
+            if st.button("완료 및 메인으로"):
+                complete_daily_mission(user_id) # 학습 완료 DB 기록
                 st.session_state.clear()
                 st.rerun()
