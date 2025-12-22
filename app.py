@@ -34,8 +34,12 @@ if "step" not in st.session_state: st.session_state.step = "learning"
 if "word_audios" not in st.session_state: st.session_state.word_audios = {}
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
-        "phase": "ready", "current_idx": 0, 
-        "shuffled_words": [], "wrong_words": [], "loop_count": 1
+        "phase": "ready", 
+        "current_idx": 0, 
+        "shuffled_words": [], 
+        "wrong_words": [], 
+        "loop_count": 1,
+        "current_options": None # [수정] 보기 고정을 위한 상태 추가
     }
 
 # ==========================================
@@ -161,7 +165,6 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
-    # [수정 1] 문법 설명을 아주 상세하게 하도록 프롬프트 강화
     prompt = f"""
     중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
     **중요: 'topic'을 제외한 모든 설명은 반드시 '한국어'로 작성해야 합니다.**
@@ -210,7 +213,6 @@ def transcribe_audio(audio_bytes):
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def evaluate_practice(target, user_input):
-    # [수정 3] 관사(an) 및 상세 오류 지적을 위한 프롬프트 강화
     prompt = f"""
     목표 문장: '{target}'
     학생 답변: '{user_input}'
@@ -223,7 +225,7 @@ def evaluate_practice(target, user_input):
     
     **피드백 지침 (FAIL인 경우):**
     - 단순히 정답만 알려주지 마세요.
-    - **관사(a/an/the)**: 왜 'a'가 아니고 'an'인지(모음 발음 앞 등), 왜 'the'가 필요한지 구체적으로 설명하세요.
+    - **관사(a/an/the)**: 왜 'a'가 아니고 'an'인지, 왜 'the'가 필요한지 구체적으로 설명하세요.
     - **수 일치**: 3인칭 단수 주어일 때 왜 동사가 변하는지 설명하세요.
     - **시제**: 현재/과거 시제 차이를 설명하세요.
     - 설명은 반드시 **한국어**로, 학생이 이해하기 쉽게 작성하세요.
@@ -354,7 +356,6 @@ elif current_level:
         with st.container(border=True):
             gr = mission['grammar']
             st.subheader(f"📘 {gr['title']}")
-            # 상세한 설명이 출력됨
             st.markdown(gr['description'])
             st.info(f"공식: {gr.get('rule','')}")
             st.markdown(f"예시: *{gr['example']}*")
@@ -391,7 +392,6 @@ elif current_level:
                 aud = audio_recorder(text="", key=f"p_rec_{idx}")
                 if aud: user_res = transcribe_audio(aud)
             with c_txt:
-                # [수정 2] clear_on_submit=True 추가하여 제출 후 입력창 비움
                 with st.form(f"p_form_{idx}", clear_on_submit=True):
                     inp = st.text_input("입력", key=f"p_inp_{idx}")
                     if st.form_submit_button("제출"): user_res = inp
@@ -409,7 +409,6 @@ elif current_level:
                         st.caption(res.replace("PASS",""))
                     else:
                         st.error("오답 ❌")
-                        # 상세 피드백 출력
                         st.warning(res.replace("FAIL","").strip())
                         
         if st.button("실전 퀴즈 도전 ⚔️", type="primary"):
@@ -417,7 +416,8 @@ elif current_level:
             st.session_state.quiz_state = {
                 "phase": "ready", "current_idx": 0,
                 "shuffled_words": random.sample(mission['words'], 20),
-                "wrong_words": [], "loop_count": 1
+                "wrong_words": [], "loop_count": 1,
+                "current_options": None # 초기화
             }
             st.rerun()
 
@@ -434,6 +434,7 @@ elif current_level:
             if qs['loop_count'] > 1: st.error("틀린 문제 재도전!")
             if st.button("시작"):
                 qs["phase"] = "mc"
+                qs["current_options"] = None # 시작 시 옵션 초기화
                 st.rerun()
                 
         elif qs["phase"] == "mc":
@@ -441,11 +442,16 @@ elif current_level:
             target = words[qs["current_idx"]]
             st.markdown(f"## {target['en']}")
             
-            opts = [target['ko']]
-            while len(opts) < 4:
-                r = random.choice(mission['words'])['ko']
-                if r not in opts: opts.append(r)
-            random.shuffle(opts)
+            # [수정] 옵션을 매번 생성하지 않고 Session State에 고정
+            if qs.get("current_options") is None:
+                opts = [target['ko']]
+                while len(opts) < 4:
+                    r = random.choice(mission['words'])['ko']
+                    if r not in opts: opts.append(r)
+                random.shuffle(opts)
+                qs["current_options"] = opts
+            else:
+                opts = qs["current_options"] # 이미 생성된 보기 사용
             
             with st.form(f"mc_{qs['loop_count']}_{qs['current_idx']}"):
                 sel = st.radio("뜻 선택", opts)
@@ -458,6 +464,10 @@ elif current_level:
                             save_wrong_word_db(user_id, target)
                             
                     time.sleep(0.5)
+                    
+                    # 다음 문제로 넘어가기 전 옵션 초기화
+                    qs["current_options"] = None 
+                    
                     if qs["current_idx"]+1 < total:
                         qs["current_idx"] += 1
                         st.rerun()
@@ -473,7 +483,8 @@ elif current_level:
             target = qs["shuffled_words"][qs["current_idx"]]
             st.markdown(f"## {target['ko']}")
             
-            with st.form(f"wr_{qs['loop_count']}_{qs['current_idx']}"):
+            # 주관식도 clear_on_submit 적용
+            with st.form(f"wr_{qs['loop_count']}_{qs['current_idx']}", clear_on_submit=True):
                 inp = st.text_input("영어 단어 입력")
                 if st.form_submit_button("제출"):
                     if inp.strip().lower() == target['en'].lower(): st.success("정답 ⭕")
