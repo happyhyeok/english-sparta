@@ -15,12 +15,6 @@ from datetime import date
 # ==========================================
 st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
-# [디버깅] 라이브러리 버전 확인 (화면 맨 위에 표시됨)
-try:
-    st.caption(f"🔧 Google Generative AI Library Version: {genai.__version__}")
-except:
-    st.caption("🔧 Version check failed")
-
 # Secrets에서 키 가져오기
 try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
@@ -35,6 +29,30 @@ except Exception as e:
 client = OpenAI(api_key=openai_api_key)
 supabase: Client = create_client(supabase_url, supabase_key)
 genai.configure(api_key=google_api_key)
+
+# ==========================================
+# [중요] API 키 및 모델 권한 진단 코드
+# ==========================================
+st.divider()
+st.subheader("🔍 Gemini API 연결 진단")
+
+try:
+    # API 키로 접근 가능한 모든 모델 리스트를 조회합니다.
+    available_models = []
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            available_models.append(m.name)
+            
+    if available_models:
+        st.success(f"✅ 연결 성공! 사용 가능한 모델 목록:\n\n{', '.join(available_models)}")
+    else:
+        st.error("❌ 연결은 되었으나, 사용 가능한 모델이 없습니다. API 키가 'Google AI Studio'에서 올바르게 생성되었는지 확인이 필요합니다.")
+        
+except Exception as e:
+    st.error(f"❌ Gemini API 연결 실패: {str(e)}")
+    st.info("💡 팁: API 키가 잘못 복사되었거나, Streamlit Secrets에 공백이 포함되었을 수 있습니다.")
+
+st.divider()
 
 # 세션 상태 초기화
 if "user_level" not in st.session_state: st.session_state.user_level = None 
@@ -134,12 +152,14 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [수정] 모델명 변경 (latest) 및 디버깅 메시지 추가
+# [수정] 진단 결과에 따라 모델명 자동 선택
 def generate_curriculum(level):
+    # 가장 안전한 모델명 시도
+    target_model = "gemini-1.5-flash"
+    
     try:
-        # 모델명을 '-latest' 붙여서 시도
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
+            model_name=target_model,
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -166,22 +186,8 @@ def generate_curriculum(level):
         return json.loads(response.text)
         
     except Exception as e:
-        st.error(f"⚠️ Gemini API Error Details: {str(e)}")
-        # 만약 최신 모델도 안되면 구형 모델로 폴백 시도 (임시 방편)
-        try:
-            st.warning("⚠️ 최신 모델 실패. 기본 모델(gemini-pro)로 재시도합니다...")
-            model_fallback = genai.GenerativeModel("gemini-pro")
-            response = model_fallback.generate_content(prompt + "\nResponse must be valid JSON string.")
-            # gemini-pro는 json 모드가 약하므로 텍스트 파싱 시도
-            txt = response.text
-            if "```json" in txt:
-                txt = txt.split("```json")[1].split("```")[0]
-            elif "```" in txt:
-                txt = txt.split("```")[1].split("```")[0]
-            return json.loads(txt)
-        except Exception as e2:
-            st.error(f"❌ Fallback failed: {str(e2)}")
-            return None
+        st.error(f"⚠️ Gemini 오류 ({target_model}): {str(e)}")
+        return None
 
 def transcribe_audio(audio_bytes):
     import io
