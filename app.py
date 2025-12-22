@@ -15,6 +15,12 @@ from datetime import date
 # ==========================================
 st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
+# [디버깅] 라이브러리 버전 확인 (화면 맨 위에 표시됨)
+try:
+    st.caption(f"🔧 Google Generative AI Library Version: {genai.__version__}")
+except:
+    st.caption("🔧 Version check failed")
+
 # Secrets에서 키 가져오기
 try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
@@ -128,11 +134,12 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [디버깅용 수정] 에러 메시지를 화면에 출력하도록 변경
+# [수정] 모델명 변경 (latest) 및 디버깅 메시지 추가
 def generate_curriculum(level):
     try:
+        # 모델명을 '-latest' 붙여서 시도
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-1.5-flash-latest",
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -159,9 +166,22 @@ def generate_curriculum(level):
         return json.loads(response.text)
         
     except Exception as e:
-        # 🚨 여기서 에러를 화면에 출력합니다!
         st.error(f"⚠️ Gemini API Error Details: {str(e)}")
-        return None
+        # 만약 최신 모델도 안되면 구형 모델로 폴백 시도 (임시 방편)
+        try:
+            st.warning("⚠️ 최신 모델 실패. 기본 모델(gemini-pro)로 재시도합니다...")
+            model_fallback = genai.GenerativeModel("gemini-pro")
+            response = model_fallback.generate_content(prompt + "\nResponse must be valid JSON string.")
+            # gemini-pro는 json 모드가 약하므로 텍스트 파싱 시도
+            txt = response.text
+            if "```json" in txt:
+                txt = txt.split("```json")[1].split("```")[0]
+            elif "```" in txt:
+                txt = txt.split("```")[1].split("```")[0]
+            return json.loads(txt)
+        except Exception as e2:
+            st.error(f"❌ Fallback failed: {str(e2)}")
+            return None
 
 def transcribe_audio(audio_bytes):
     import io
