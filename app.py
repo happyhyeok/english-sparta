@@ -161,37 +161,36 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
-    # [수정 1] 프롬프트에 JSON 스키마를 명시하여 Key 에러 방지
+    # [수정] 프롬프트 강화: 한글 설명 강제
     prompt = f"""
     중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
-    반드시 아래 형식을 정확히 지켜야 합니다.
+    **중요: 'topic'을 제외한 모든 설명(문법 제목, 문법 설명, 힌트 등)은 반드시 '한국어'로 작성해야 합니다.**
     
     Output JSON Schema:
     {{
-        "topic": "주제 제목",
+        "topic": "English Topic Name (e.g., Daily Routine)",
         "grammar": {{
-            "title": "문법 제목",
-            "description": "문법 설명",
-            "rule": "공식",
-            "example": "예문"
+            "title": "문법 제목 (반드시 한국어로, 예: 단순 현재 시제)",
+            "description": "문법에 대한 쉬운 설명 (반드시 한국어로 작성)",
+            "rule": "공식 (영어)",
+            "example": "예문 (영어)"
         }},
         "words": [
-            {{ "en": "영단어", "ko": "한글뜻" }}, 
+            {{ "en": "English Word", "ko": "한국어 뜻" }}, 
             ... (20개)
         ],
         "practice_sentences": [
             {{ 
                 "ko": "한글 문장", 
                 "en": "영어 정답 문장", 
-                "hint_structure": "문장 구조 힌트", 
-                "hint_grammar": "문법 힌트" 
+                "hint_structure": "문장 구조 힌트 (한국어)", 
+                "hint_grammar": "문법 힌트 (한국어)" 
             }},
             ... (20개)
         ]
     }}
     """
     
-    # [수정 2] JSON 파싱 에러 처리 (안전장치)
     try:
         res = client.chat.completions.create(
             model="gpt-4o-mini", 
@@ -475,10 +474,8 @@ elif current_level:
             
             if st.button("완료 및 메인으로"):
                 complete_daily_mission(user_id)
-                
-                # [수정 3] 전체 세션 초기화 대신, 학습 관련 세션만 삭제하여 로그아웃 방지
+                # 로그아웃 방지를 위해 특정 키만 초기화
                 for key in ["mission", "step", "word_audios", "quiz_state"]:
                     if key in st.session_state:
                         del st.session_state[key]
-                
                 st.rerun()
