@@ -30,30 +30,6 @@ client = OpenAI(api_key=openai_api_key)
 supabase: Client = create_client(supabase_url, supabase_key)
 genai.configure(api_key=google_api_key)
 
-# ==========================================
-# [중요] API 키 및 모델 권한 진단 코드
-# ==========================================
-st.divider()
-st.subheader("🔍 Gemini API 연결 진단")
-
-try:
-    # API 키로 접근 가능한 모든 모델 리스트를 조회합니다.
-    available_models = []
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            available_models.append(m.name)
-            
-    if available_models:
-        st.success(f"✅ 연결 성공! 사용 가능한 모델 목록:\n\n{', '.join(available_models)}")
-    else:
-        st.error("❌ 연결은 되었으나, 사용 가능한 모델이 없습니다. API 키가 'Google AI Studio'에서 올바르게 생성되었는지 확인이 필요합니다.")
-        
-except Exception as e:
-    st.error(f"❌ Gemini API 연결 실패: {str(e)}")
-    st.info("💡 팁: API 키가 잘못 복사되었거나, Streamlit Secrets에 공백이 포함되었을 수 있습니다.")
-
-st.divider()
-
 # 세션 상태 초기화
 if "user_level" not in st.session_state: st.session_state.user_level = None 
 if "mission" not in st.session_state: st.session_state.mission = None
@@ -152,10 +128,10 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [수정] 진단 결과에 따라 모델명 자동 선택
+# [최종 수정] Gemini 2.5 Flash 모델 사용
 def generate_curriculum(level):
-    # 가장 안전한 모델명 시도
-    target_model = "gemini-1.5-flash"
+    # 진단 결과에 있던 'gemini-2.5-flash' 사용
+    target_model = "gemini-2.5-flash"
     
     try:
         model = genai.GenerativeModel(
@@ -167,18 +143,35 @@ def generate_curriculum(level):
         You are an English education expert for Korean middle school students.
         Create a JSON curriculum for level '{level}'.
         
+        **Constraints:**
+        1. 'topic' must be in English.
+        2. **All explanations (grammar title, description, hints) MUST be in Korean.**
+        3. Make grammar explanations detailed, easy to understand, and include 'Why' & 'How'.
+        
         Output JSON Schema:
         {{
             "topic": "English Topic Name",
             "grammar": {{
                 "title": "문법 제목 (한국어)",
-                "description": "문법 상세 설명 (한국어). Why & How 포함.",
+                "description": "문법 상세 설명 (한국어). 줄글과 불렛포인트 활용하여 가독성 높게.",
                 "rule": "Rule (English)",
                 "example": "Example (English)"
             }},
-            "words": [ {{ "en": "English Word", "ko": "한국어 뜻" }} ],
-            "practice_sentences": [ {{ "ko": "한글 문장", "en": "English Sentence", "hint_structure": "구조 힌트", "hint_grammar": "문법 힌트" }} ]
+            "words": [
+                {{ "en": "English Word", "ko": "한국어 뜻" }}, 
+                ... (20 items)
+            ],
+            "practice_sentences": [
+                {{ 
+                    "ko": "한글 문장", 
+                    "en": "English Sentence", 
+                    "hint_structure": "구조 힌트 (한국어)", 
+                    "hint_grammar": "문법 힌트 (한국어)" 
+                }},
+                ... (20 items)
+            ]
         }}
+        
         Create exactly 20 words and 20 sentences.
         """
         
@@ -186,8 +179,14 @@ def generate_curriculum(level):
         return json.loads(response.text)
         
     except Exception as e:
-        st.error(f"⚠️ Gemini 오류 ({target_model}): {str(e)}")
-        return None
+        # 혹시 2.5가 안되면 2.0으로 시도하는 안전장치
+        try:
+            fallback_model = genai.GenerativeModel("gemini-2.0-flash", generation_config={"response_mime_type": "application/json"})
+            response = fallback_model.generate_content(prompt)
+            return json.loads(response.text)
+        except:
+            st.error(f"⚠️ Gemini API Error: {str(e)}")
+            return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -196,7 +195,27 @@ def transcribe_audio(audio_bytes):
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def evaluate_practice(target, user_input):
-    prompt = f"목표: '{target}', 답변: '{user_input}'. 의미 일치 시 PASS, 아니면 FAIL. FAIL시 구체적 피드백(한글, 관사/시제/수일치 등 포함)."
+    prompt = f"""
+    목표 문장: '{target}'
+    학생 답변: '{user_input}'
+    
+    역할: 꼼꼼하고 친절한 영어 선생님.
+    
+    채점 기준:
+    1. 의미가 통하면 'PASS'입니다. (사소한 철자 실수 허용)
+    2. 문법적으로 틀리거나 의미가 다르면 'FAIL'입니다.
+    
+    **피드백 지침 (FAIL인 경우):**
+    - 단순히 정답만 알려주지 마세요.
+    - **관사(a/an/the)**: 왜 'a'가 아니고 'an'인지, 왜 'the'가 필요한지 구체적으로 설명하세요.
+    - **수 일치**: 3인칭 단수 주어일 때 왜 동사가 변하는지 설명하세요.
+    - **시제**: 현재/과거 시제 차이를 설명하세요.
+    - 설명은 반드시 **한국어**로, 학생이 이해하기 쉽게 작성하세요.
+    
+    출력 형식:
+    - 정답이면: PASS
+    - 오답이면: FAIL [구체적인 한국어 피드백]
+    """
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
     return res.choices[0].message.content
 
@@ -242,7 +261,8 @@ if should_test:
 elif current_level:
     st.session_state.user_level = current_level
     if not st.session_state.mission:
-        with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini)", expanded=True) as status:
+        # 메시지 변경: 2.5 Flash 사용 표시
+        with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini 2.5)", expanded=True) as status:
             mission_data = generate_curriculum(current_level)
             if mission_data:
                 st.session_state.mission = mission_data
