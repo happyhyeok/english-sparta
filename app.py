@@ -1,4 +1,5 @@
 import streamlit as st
+import google.generativeai as genai  # 👈 Gemini 라이브러리
 from openai import OpenAI
 from audio_recorder_streamlit import audio_recorder
 import streamlit.components.v1 as components
@@ -19,13 +20,15 @@ try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
     supabase_url = st.secrets["SUPABASE_URL"]
     supabase_key = st.secrets["SUPABASE_KEY"]
+    google_api_key = st.secrets["GOOGLE_API_KEY"] # 👈 구글 키 로드
 except Exception:
-    st.error("❌ API 키 설정이 필요합니다. secrets.toml 파일이나 Streamlit Cloud Secrets를 확인하세요.")
+    st.error("❌ API 키 설정이 필요합니다. Streamlit Cloud Secrets에 OPENAI_API_KEY, SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY가 모두 있는지 확인하세요.")
     st.stop()
 
 # 클라이언트 초기화
 client = OpenAI(api_key=openai_api_key)
 supabase: Client = create_client(supabase_url, supabase_key)
+genai.configure(api_key=google_api_key) # 👈 Gemini 설정
 
 # 세션 상태 초기화
 if "user_level" not in st.session_state: st.session_state.user_level = None 
@@ -39,7 +42,7 @@ if "quiz_state" not in st.session_state:
         "shuffled_words": [], 
         "wrong_words": [], 
         "loop_count": 1,
-        "current_options": None
+        "current_options": None # 퀴즈 보기 고정용
     }
 
 # ==========================================
@@ -145,8 +148,7 @@ def save_wrong_word_db(user_id, word_obj):
 # 3. AI 및 유틸리티 함수
 # ==========================================
 def set_focus_js():
-    # [수정] 모든 텍스트 입력을 찾은 후 '마지막' 요소(현재 문제 입력창)에 포커스
-    # setTimeout으로 렌더링 시간을 확보하여 확실하게 포커스 잡기
+    # 마지막 입력창(현재 문제)에 자동으로 포커스를 맞춤
     components.html(
         """
         <script>
@@ -175,46 +177,54 @@ def run_level_test_ai(text):
     )
     return res.choices[0].message.content.strip()
 
+# [핵심 변경] Gemini 1.5 Flash로 커리큘럼 생성 (속도 대폭 개선)
 def generate_curriculum(level):
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        generation_config={"response_mime_type": "application/json"}
+    )
+    
     prompt = f"""
-    중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
-    **중요: 'topic'을 제외한 모든 설명은 반드시 '한국어'로 작성해야 합니다.**
-    **문법 설명은 중학생이 이해하기 쉽게 아주 구체적이고 상세하게 작성하세요. (Why, How 포함)**
+    You are an English education expert for Korean middle school students.
+    Create a JSON curriculum for level '{level}'.
+    
+    **Constraints:**
+    1. 'topic' must be in English.
+    2. **All explanations (grammar title, description, hints) MUST be in Korean.**
+    3. Make grammar explanations detailed, easy to understand, and include 'Why' & 'How'.
     
     Output JSON Schema:
     {{
         "topic": "English Topic Name",
         "grammar": {{
             "title": "문법 제목 (한국어)",
-            "description": "문법 상세 설명 (한국어). 이 문법을 언제 쓰는지, 형태는 어떤지, 주의할 점(3인칭 단수 등)을 줄글과 불렛포인트로 자세히 설명.",
-            "rule": "공식 (영어)",
-            "example": "예문 (영어)"
+            "description": "문법 상세 설명 (한국어). 줄글과 불렛포인트 활용하여 가독성 높게.",
+            "rule": "Rule (English)",
+            "example": "Example (English)"
         }},
         "words": [
             {{ "en": "English Word", "ko": "한국어 뜻" }}, 
-            ... (20개)
+            ... (20 items)
         ],
         "practice_sentences": [
             {{ 
                 "ko": "한글 문장", 
-                "en": "영어 정답 문장", 
-                "hint_structure": "문장 구조 힌트 (한국어)", 
+                "en": "English Sentence", 
+                "hint_structure": "구조 힌트 (한국어)", 
                 "hint_grammar": "문법 힌트 (한국어)" 
             }},
-            ... (20개)
+            ... (20 items)
         ]
     }}
+    
+    Create exactly 20 words and 20 sentences.
     """
     
     try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini", 
-            messages=[{"role":"system", "content":prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(res.choices[0].message.content)
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
     except Exception as e:
-        print(f"JSON Error: {e}")
+        print(f"Gemini Error: {e}")
         return None
 
 def transcribe_audio(audio_bytes):
@@ -224,26 +234,26 @@ def transcribe_audio(audio_bytes):
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def evaluate_practice(target, user_input):
+    # 채점 및 피드백은 OpenAI 유지 (디테일한 피드백 강점)
     prompt = f"""
     목표 문장: '{target}'
     학생 답변: '{user_input}'
     
-    역할: 당신은 꼼꼼하고 친절한 중학 영어 선생님입니다.
+    역할: 꼼꼼하고 친절한 영어 선생님.
     
     채점 기준:
-    1. 의미가 통하면 'PASS'입니다. (사소한 철자 실수 허용)
-    2. 문법적으로 틀리거나 의미가 다르면 'FAIL'입니다.
+    1. 의미가 통하면 'PASS' (사소한 오타 허용).
+    2. 문법 오류나 의미 불일치는 'FAIL'.
     
-    **피드백 지침 (FAIL인 경우):**
-    - 단순히 정답만 알려주지 마세요.
-    - **관사(a/an/the)**: 왜 'a'가 아니고 'an'인지, 왜 'the'가 필요한지 구체적으로 설명하세요.
-    - **수 일치**: 3인칭 단수 주어일 때 왜 동사가 변하는지 설명하세요.
-    - **시제**: 현재/과거 시제 차이를 설명하세요.
-    - 설명은 반드시 **한국어**로, 학생이 이해하기 쉽게 작성하세요.
+    **FAIL 시 피드백 지침 (한국어):**
+    - 단순히 정답만 주지 말고 이유를 설명하세요.
+    - **관사(a/an/the)**: 사용 이유 설명.
+    - **수 일치**: 3인칭 단수 변화 설명.
+    - **시제**: 시제 차이 설명.
     
     출력 형식:
-    - 정답이면: PASS
-    - 오답이면: FAIL [구체적인 한국어 피드백]
+    - 정답: PASS
+    - 오답: FAIL [구체적인 피드백]
     """
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
     return res.choices[0].message.content
@@ -336,12 +346,17 @@ if should_test:
 elif current_level:
     st.session_state.user_level = current_level
     
+    # 미션 생성 (Gemini 사용으로 속도 개선)
     if not st.session_state.mission:
-        with st.spinner("오늘의 미션 생성 중..."):
+        with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini)", expanded=True) as status:
+            st.write("AI 선생님이 커리큘럼을 짜고 있어요...")
             mission_data = generate_curriculum(current_level)
+            
             if mission_data:
                 st.session_state.mission = mission_data
+                status.update(label="준비 완료!", state="complete", expanded=False)
             else:
+                status.update(label="오류 발생", state="error")
                 st.error("⚠️ 커리큘럼 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
                 st.stop()
             
@@ -359,6 +374,7 @@ elif current_level:
             
             for i, w in enumerate(mission['words']):
                 st.session_state.word_audios[i] = generate_tts(w['en'])
+                # 프로그레스 바 에러 방지 로직
                 prog_val = (i + 1) / total_words
                 if prog_val > 1.0: prog_val = 1.0
                 pb.progress(prog_val)
@@ -371,6 +387,7 @@ elif current_level:
             st.info(f"공식: {gr.get('rule','')}")
             st.markdown(f"예시: *{gr['example']}*")
         
+        # 매직 커맨드 에러 방지를 위해 st.columns 객체 직접 사용
         for i, w in enumerate(mission['words']):
             c1, c2 = st.columns([4,1])
             c1.markdown(f"**{i+1}. {w['en']}** ({w['ko']})")
@@ -403,6 +420,7 @@ elif current_level:
                 aud = audio_recorder(text="", key=f"p_rec_{idx}")
                 if aud: user_res = transcribe_audio(aud)
             with c_txt:
+                # 제출 시 입력창 비우기 (clear_on_submit=True)
                 with st.form(f"p_form_{idx}", clear_on_submit=True):
                     inp = st.text_input("입력", key=f"p_inp_{idx}")
                     if st.form_submit_button("제출"): user_res = inp
@@ -428,7 +446,7 @@ elif current_level:
                 "phase": "ready", "current_idx": 0,
                 "shuffled_words": random.sample(mission['words'], 20),
                 "wrong_words": [], "loop_count": 1,
-                "current_options": None 
+                "current_options": None # 보기 고정용 초기화
             }
             st.rerun()
 
@@ -453,6 +471,7 @@ elif current_level:
             target = words[qs["current_idx"]]
             st.markdown(f"## {target['en']}")
             
+            # [보기 고정 로직] 이미 생성된 보기가 없으면 새로 생성 후 저장
             if qs.get("current_options") is None:
                 opts = [target['ko']]
                 while len(opts) < 4:
@@ -474,7 +493,7 @@ elif current_level:
                             save_wrong_word_db(user_id, target)
                             
                     time.sleep(0.5)
-                    qs["current_options"] = None 
+                    qs["current_options"] = None # 다음 문제를 위해 보기 초기화
                     
                     if qs["current_idx"]+1 < total:
                         qs["current_idx"] += 1
@@ -488,7 +507,7 @@ elif current_level:
         elif qs["phase"] == "writing":
             st.subheader(f"주관식 ({qs['current_idx']+1}/{total})")
             
-            # [수정] 입력창 자동 포커스 함수 호출
+            # 입력창 자동 포커스 (JS)
             set_focus_js()
             
             target = qs["shuffled_words"][qs["current_idx"]]
@@ -526,6 +545,7 @@ elif current_level:
             
             if st.button("완료 및 메인으로"):
                 complete_daily_mission(user_id)
+                # 로그아웃 방지: 특정 키만 삭제
                 for key in ["mission", "step", "word_audios", "quiz_state"]:
                     if key in st.session_state:
                         del st.session_state[key]
