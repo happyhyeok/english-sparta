@@ -161,16 +161,15 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
-    # [수정] 프롬프트 강화: 한글 설명 강제
     prompt = f"""
     중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
     **중요: 'topic'을 제외한 모든 설명(문법 제목, 문법 설명, 힌트 등)은 반드시 '한국어'로 작성해야 합니다.**
     
     Output JSON Schema:
     {{
-        "topic": "English Topic Name (e.g., Daily Routine)",
+        "topic": "English Topic Name",
         "grammar": {{
-            "title": "문법 제목 (반드시 한국어로, 예: 단순 현재 시제)",
+            "title": "문법 제목 (반드시 한국어로)",
             "description": "문법에 대한 쉬운 설명 (반드시 한국어로 작성)",
             "rule": "공식 (영어)",
             "example": "예문 (영어)"
@@ -209,7 +208,17 @@ def transcribe_audio(audio_bytes):
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def evaluate_practice(target, user_input):
-    prompt = f"목표: '{target}', 답변: '{user_input}'. 의미 일치 시 PASS, 아니면 FAIL. FAIL시 구체적 피드백(한글)."
+    # [수정 1] 구체적인 문법 피드백을 요청하도록 프롬프트 수정
+    prompt = f"""
+    목표 문장: '{target}'
+    학생 답변: '{user_input}'
+    
+    역할: 당신은 친절한 영어 선생님입니다.
+    1. 의미가 일치하면 'PASS'라고만 출력하세요. (철자가 약간 틀려도 의미가 통하면 PASS)
+    2. 의미가 다르거나 문법적으로 틀렸다면 'FAIL'과 함께 이유를 한글로 구체적으로 설명하세요.
+    3. **중요:** 문법 오류 시, 단순히 정답만 알려주지 말고 문법 용어를 사용하여 이유를 설명해주세요.
+       예시: "주어가 3인칭 단수(She)이므로 동사 go에 es를 붙여 goes가 되어야 합니다."
+    """
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
     return res.choices[0].message.content
 
@@ -320,12 +329,12 @@ elif current_level:
         
         if not st.session_state.word_audios:
             pb = st.progress(0, "발음 준비 중...")
-            total_words = len(mission['words'])  # 1. 실제 단어 개수 확인
+            # [수정 2] 프로그레스 바 에러 방지 (전체 개수 기반 계산)
+            total_words = len(mission['words'])
             
             for i, w in enumerate(mission['words']):
                 st.session_state.word_audios[i] = generate_tts(w['en'])
                 
-                # 2. 실제 개수 기준으로 비율 계산 및 1.0 초과 방지
                 prog_val = (i + 1) / total_words
                 if prog_val > 1.0: prog_val = 1.0
                 pb.progress(prog_val)
@@ -341,148 +350,4 @@ elif current_level:
             
         for i, w in enumerate(mission['words']):
             c1, c2 = st.columns([4,1])
-            with c1: st.markdown(f"**{i+1}. {w['en']}** ({w['ko']})")
-            with c2: 
-                if i in st.session_state.word_audios: st.audio(st.session_state.word_audios[i], format='audio/mp3')
-
-        if st.button("연습하러 가기 👉", type="primary"):
-            st.session_state.step = "practice"
-            st.rerun()
-
-    # Step 2. Practice
-    elif st.session_state.step == "practice":
-        st.markdown("### ✍️ Step 2. 문장 만들기")
-        
-        with st.container(border=True):
-            gr = mission['grammar']
-            st.markdown(f"**핵심 문법:** {gr['title']}")
-            st.caption(gr.get('rule', ''))
-
-        for idx, q in enumerate(mission['practice_sentences']):
-            st.divider()
-            st.markdown(f"**Q{idx+1}. {q['ko']}**")
-            with st.expander("힌트"):
-                st.write(f"{q.get('hint_structure','')} / {q.get('hint_grammar','')}")
-                
-            c_mic, c_txt = st.columns([1,2])
-            user_res = None
-            with c_mic:
-                aud = audio_recorder(text="", key=f"p_rec_{idx}")
-                if aud: user_res = transcribe_audio(aud)
-            with c_txt:
-                with st.form(f"p_form_{idx}"):
-                    inp = st.text_input("입력", key=f"p_inp_{idx}")
-                    if st.form_submit_button("제출"): user_res = inp
-            
-            if user_res:
-                st.write(f"답안: {user_res}")
-                if user_res.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
-                    st.success("정답! 🎉")
-                else:
-                    with st.spinner("채점..."):
-                        res = evaluate_practice(q['en'], user_res)
-                    if "PASS" in res:
-                        st.success("통과! 👍")
-                        st.caption(res.replace("PASS",""))
-                    else:
-                        st.error("오답 ❌")
-                        st.warning(res.replace("FAIL",""))
-                        
-        if st.button("실전 퀴즈 도전 ⚔️", type="primary"):
-            st.session_state.step = "drill"
-            st.session_state.quiz_state = {
-                "phase": "ready", "current_idx": 0,
-                "shuffled_words": random.sample(mission['words'], 20),
-                "wrong_words": [], "loop_count": 1
-            }
-            st.rerun()
-
-    # Step 3. Drill
-    elif st.session_state.step == "drill":
-        qs = st.session_state.quiz_state
-        words = qs["shuffled_words"]
-        total = len(words)
-        
-        st.markdown(f"### ⚔️ Step 3. 실전 테스트 ({qs['loop_count']}회차)")
-        
-        if qs["phase"] == "ready":
-            st.info(f"문제 수: {total}개")
-            if qs['loop_count'] > 1: st.error("틀린 문제 재도전!")
-            if st.button("시작"):
-                qs["phase"] = "mc"
-                st.rerun()
-                
-        elif qs["phase"] == "mc":
-            st.subheader(f"객관식 ({qs['current_idx']+1}/{total})")
-            target = words[qs["current_idx"]]
-            st.markdown(f"## {target['en']}")
-            
-            opts = [target['ko']]
-            while len(opts) < 4:
-                r = random.choice(mission['words'])['ko']
-                if r not in opts: opts.append(r)
-            random.shuffle(opts)
-            
-            with st.form(f"mc_{qs['loop_count']}_{qs['current_idx']}"):
-                sel = st.radio("뜻 선택", opts)
-                if st.form_submit_button("확인"):
-                    if sel == target['ko']: st.success("정답 ⭕")
-                    else:
-                        st.error("오답 ❌")
-                        if target not in qs["wrong_words"]: 
-                            qs["wrong_words"].append(target)
-                            save_wrong_word_db(user_id, target)
-                            
-                    time.sleep(0.5)
-                    if qs["current_idx"]+1 < total:
-                        qs["current_idx"] += 1
-                        st.rerun()
-                    else:
-                        qs["phase"] = "writing"
-                        qs["current_idx"] = 0
-                        random.shuffle(qs["shuffled_words"])
-                        st.rerun()
-                        
-        elif qs["phase"] == "writing":
-            st.subheader(f"주관식 ({qs['current_idx']+1}/{total})")
-            set_focus_js()
-            target = qs["shuffled_words"][qs["current_idx"]]
-            st.markdown(f"## {target['ko']}")
-            
-            with st.form(f"wr_{qs['loop_count']}_{qs['current_idx']}"):
-                inp = st.text_input("영어 단어 입력")
-                if st.form_submit_button("제출"):
-                    if inp.strip().lower() == target['en'].lower(): st.success("정답 ⭕")
-                    else:
-                        st.error("오답 ❌")
-                        if target not in qs["wrong_words"]:
-                            qs["wrong_words"].append(target)
-                            save_wrong_word_db(user_id, target)
-                            
-                    time.sleep(0.5)
-                    if qs["current_idx"]+1 < total:
-                        qs["current_idx"] += 1
-                        st.rerun()
-                    else:
-                        if qs["wrong_words"]:
-                            qs["shuffled_words"] = qs["wrong_words"][:]
-                            qs["wrong_words"] = []
-                            qs["current_idx"] = 0
-                            qs["phase"] = "ready"
-                            qs["loop_count"] += 1
-                            st.rerun()
-                        else:
-                            qs["phase"] = "end"
-                            st.rerun()
-                            
-        elif qs["phase"] == "end":
-            st.balloons()
-            st.success("🎉 오늘의 학습 완료!")
-            
-            if st.button("완료 및 메인으로"):
-                complete_daily_mission(user_id)
-                # 로그아웃 방지를 위해 특정 키만 초기화
-                for key in ["mission", "step", "word_audios", "quiz_state"]:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
+            with c1: st
