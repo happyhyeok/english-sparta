@@ -39,7 +39,7 @@ if "quiz_state" not in st.session_state:
         "shuffled_words": [], 
         "wrong_words": [], 
         "loop_count": 1,
-        "current_options": None # [수정] 보기 고정을 위한 상태 추가
+        "current_options": None
     }
 
 # ==========================================
@@ -145,8 +145,19 @@ def save_wrong_word_db(user_id, word_obj):
 # 3. AI 및 유틸리티 함수
 # ==========================================
 def set_focus_js():
+    # [수정] 모든 텍스트 입력을 찾은 후 '마지막' 요소(현재 문제 입력창)에 포커스
+    # setTimeout으로 렌더링 시간을 확보하여 확실하게 포커스 잡기
     components.html(
-        """<script>var input = window.parent.document.querySelector("input[type=text]"); if (input) { input.focus(); }</script>""",
+        """
+        <script>
+            setTimeout(function() {
+                var inputs = window.parent.document.querySelectorAll("input[type=text]");
+                if (inputs.length > 0) {
+                    inputs[inputs.length - 1].focus();
+                }
+            }, 100); 
+        </script>
+        """,
         height=0,
     )
 
@@ -417,7 +428,7 @@ elif current_level:
                 "phase": "ready", "current_idx": 0,
                 "shuffled_words": random.sample(mission['words'], 20),
                 "wrong_words": [], "loop_count": 1,
-                "current_options": None # 초기화
+                "current_options": None 
             }
             st.rerun()
 
@@ -434,7 +445,7 @@ elif current_level:
             if qs['loop_count'] > 1: st.error("틀린 문제 재도전!")
             if st.button("시작"):
                 qs["phase"] = "mc"
-                qs["current_options"] = None # 시작 시 옵션 초기화
+                qs["current_options"] = None
                 st.rerun()
                 
         elif qs["phase"] == "mc":
@@ -442,7 +453,6 @@ elif current_level:
             target = words[qs["current_idx"]]
             st.markdown(f"## {target['en']}")
             
-            # [수정] 옵션을 매번 생성하지 않고 Session State에 고정
             if qs.get("current_options") is None:
                 opts = [target['ko']]
                 while len(opts) < 4:
@@ -451,7 +461,7 @@ elif current_level:
                 random.shuffle(opts)
                 qs["current_options"] = opts
             else:
-                opts = qs["current_options"] # 이미 생성된 보기 사용
+                opts = qs["current_options"]
             
             with st.form(f"mc_{qs['loop_count']}_{qs['current_idx']}"):
                 sel = st.radio("뜻 선택", opts)
@@ -464,8 +474,6 @@ elif current_level:
                             save_wrong_word_db(user_id, target)
                             
                     time.sleep(0.5)
-                    
-                    # 다음 문제로 넘어가기 전 옵션 초기화
                     qs["current_options"] = None 
                     
                     if qs["current_idx"]+1 < total:
@@ -479,11 +487,13 @@ elif current_level:
                         
         elif qs["phase"] == "writing":
             st.subheader(f"주관식 ({qs['current_idx']+1}/{total})")
+            
+            # [수정] 입력창 자동 포커스 함수 호출
             set_focus_js()
+            
             target = qs["shuffled_words"][qs["current_idx"]]
             st.markdown(f"## {target['ko']}")
             
-            # 주관식도 clear_on_submit 적용
             with st.form(f"wr_{qs['loop_count']}_{qs['current_idx']}", clear_on_submit=True):
                 inp = st.text_input("영어 단어 입력")
                 if st.form_submit_button("제출"):
