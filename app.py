@@ -2,7 +2,7 @@ import streamlit as st
 from openai import OpenAI
 from audio_recorder_streamlit import audio_recorder
 import streamlit.components.v1 as components
-from supabase import create_client, Client  # 👈 이 부분이 포함되어야 합니다!
+from supabase import create_client, Client
 import json
 import random
 import time
@@ -14,7 +14,7 @@ from datetime import date
 # ==========================================
 st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
-# Secrets에서 키 가져오기 (로컬/클라우드 공용)
+# Secrets에서 키 가져오기
 try:
     openai_api_key = st.secrets["OPENAI_API_KEY"]
     supabase_url = st.secrets["SUPABASE_URL"]
@@ -39,7 +39,7 @@ if "quiz_state" not in st.session_state:
     }
 
 # ==========================================
-# 2. Supabase DB 관리 함수 (이 함수들이 꼭 있어야 합니다!)
+# 2. Supabase DB 관리 함수
 # ==========================================
 
 def get_user_data(user_id):
@@ -62,7 +62,7 @@ def create_new_user(user_id):
     supabase.table("users").insert(data).execute()
 
 def update_attendance(user_id):
-    """출석 체크 및 Streak 로직 (경고/격려 메시지 반환)"""
+    """출석 체크 및 Streak 로직"""
     user = get_user_data(user_id)
     if not user:
         create_new_user(user_id)
@@ -76,28 +76,22 @@ def update_attendance(user_id):
     new_streak = current_streak
     
     if last_visit_str == today_str:
-        # 오늘 이미 방문함
         msg = f"오늘도 오셨군요! 현재 {current_streak}일 연속 학습 중입니다. 🔥"
     else:
-        # 날짜 차이 계산
         if last_visit_str:
             last_date = datetime.date.fromisoformat(last_visit_str)
             delta = (date.today() - last_date).days
             
             if delta == 1:
-                # 어제 오고 오늘 옴 (연속)
                 new_streak += 1
                 msg = f"대단해요! {new_streak}일째 연속 출석 중입니다! 🚀"
             else:
-                # 결석함 (초기화)
                 new_streak = 1
                 msg = f"앗! {delta-1}일 결석하여 스트릭이 초기화되었습니다 ㅠㅠ 다시 시작해봐요! 💪"
         else:
-            # 첫 방문
             new_streak = 1
             msg = "환영합니다! 오늘부터 1일! 🎉"
             
-        # DB 업데이트
         supabase.table("users").update({
             "last_visit_date": today_str,
             "streak": new_streak
@@ -112,17 +106,15 @@ def update_level_and_test_log(user_id, new_level):
     
     supabase.table("users").update({
         "current_level": new_level,
-        "last_test_count": current_total # 현재 완료 횟수를 기준점으로 저장
+        "last_test_count": current_total
     }).eq("user_id", user_id).execute()
 
 def complete_daily_mission(user_id):
     """학습 완료 처리 (+1 카운트)"""
-    # 1. users 테이블 카운트 증가
     user = get_user_data(user_id)
     new_count = user.get("total_complete_count", 0) + 1
     supabase.table("users").update({"total_complete_count": new_count}).eq("user_id", user_id).execute()
     
-    # 2. study_logs에 기록
     supabase.table("study_logs").insert({
         "user_id": user_id,
         "study_date": date.today().isoformat(),
@@ -130,7 +122,7 @@ def complete_daily_mission(user_id):
     }).execute()
 
 def save_wrong_word_db(user_id, word_obj):
-    """틀린 단어 DB 저장 (나만의 단어장)"""
+    """틀린 단어 DB 저장"""
     res = supabase.table("wrong_words").select("*").eq("user_id", user_id).eq("word", word_obj['en']).execute()
     
     if res.data:
@@ -169,17 +161,47 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
+    # [수정 1] 프롬프트에 JSON 스키마를 명시하여 Key 에러 방지
     prompt = f"""
-    중학생 레벨 '{level}'용 영어 학습 JSON 생성.
-    1. 문법(한글설명), 2. 단어 20개, 3. 문장 20개
-    Output JSON: {{ "topic": "...", "grammar": {{...}}, "words": [{{...}}], "practice_sentences": [{{...}}] }}
+    중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
+    반드시 아래 형식을 정확히 지켜야 합니다.
+    
+    Output JSON Schema:
+    {{
+        "topic": "주제 제목",
+        "grammar": {{
+            "title": "문법 제목",
+            "description": "문법 설명",
+            "rule": "공식",
+            "example": "예문"
+        }},
+        "words": [
+            {{ "en": "영단어", "ko": "한글뜻" }}, 
+            ... (20개)
+        ],
+        "practice_sentences": [
+            {{ 
+                "ko": "한글 문장", 
+                "en": "영어 정답 문장", 
+                "hint_structure": "문장 구조 힌트", 
+                "hint_grammar": "문법 힌트" 
+            }},
+            ... (20개)
+        ]
+    }}
     """
-    res = client.chat.completions.create(
-        model="gpt-4o-mini", 
-        messages=[{"role":"system", "content":prompt}],
-        response_format={"type": "json_object"}
-    )
-    return json.loads(res.choices[0].message.content)
+    
+    # [수정 2] JSON 파싱 에러 처리 (안전장치)
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[{"role":"system", "content":prompt}],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(res.choices[0].message.content)
+    except Exception as e:
+        print(f"JSON Error: {e}")
+        return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -197,13 +219,12 @@ def evaluate_practice(target, user_input):
 # ==========================================
 st.title("🏫 AI 중학 영어 스파르타")
 
-# 사이드바: 로그인 & 정보 (DB 버전 필수)
+# 사이드바
 with st.sidebar:
     st.header("🔑 로그인")
     user_id = st.text_input("아이디(ID)", value="student1")
     
     if user_id:
-        # 출석 체크 및 DB 로드
         streak, msg = update_attendance(user_id)
         user_data = get_user_data(user_id)
         
@@ -223,7 +244,7 @@ with st.sidebar:
         st.stop()
 
 # ==========================================
-# 레벨 테스트 여부 판단 로직 (DB 기반)
+# 레벨 테스트 여부 판단
 # ==========================================
 should_test = False
 current_level = user_data.get('current_level')
@@ -235,7 +256,7 @@ if current_level is None:
     should_test = True
     st.info("👋 처음 오셨군요! 레벨 테스트를 진행합니다.")
 
-# 2. 5회 완료 주기 체크 (누적 - 마지막테스트 >= 5)
+# 2. 5회 완료 주기 체크
 elif (total_complete - last_test_cnt) >= 5:
     should_test = True
     st.warning(f"📅 학습 {total_complete - last_test_cnt}회 완료! 정기 레벨 점검 시간입니다.")
@@ -250,7 +271,6 @@ if should_test:
     q_text = "What do you usually do on weekends?"
     st.markdown(f"**Q. {q_text}** (주말에 보통 뭐 해요?)")
     
-    # 팁 제공
     with st.expander("💡 답변 팁 보기", expanded=True):
         st.markdown("""
         - **"Game"**, **"Sleep"** 처럼 단어만 말해도 됩니다.
@@ -270,7 +290,7 @@ if should_test:
                 st.warning("잘 안 들렸어요.")
             else:
                 lvl = run_level_test_ai(txt)
-                update_level_and_test_log(user_id, lvl) # DB 저장
+                update_level_and_test_log(user_id, lvl)
                 st.balloons()
                 st.success(f"결과: **[{lvl}]** 레벨로 설정되었습니다!")
                 time.sleep(2)
@@ -284,7 +304,12 @@ elif current_level:
     
     if not st.session_state.mission:
         with st.spinner("오늘의 미션 생성 중..."):
-            st.session_state.mission = generate_curriculum(current_level)
+            mission_data = generate_curriculum(current_level)
+            if mission_data:
+                st.session_state.mission = mission_data
+            else:
+                st.error("⚠️ 커리큘럼 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+                st.stop()
             
     mission = st.session_state.mission
     st.header(f"Topic: {mission['topic']}")
@@ -322,7 +347,6 @@ elif current_level:
     elif st.session_state.step == "practice":
         st.markdown("### ✍️ Step 2. 문장 만들기")
         
-        # 문법 리마인드
         with st.container(border=True):
             gr = mission['grammar']
             st.markdown(f"**핵심 문법:** {gr['title']}")
@@ -367,7 +391,7 @@ elif current_level:
             }
             st.rerun()
 
-    # Step 3. Drill (DB 저장 기능 포함)
+    # Step 3. Drill
     elif st.session_state.step == "drill":
         qs = st.session_state.quiz_state
         words = qs["shuffled_words"]
@@ -401,7 +425,7 @@ elif current_level:
                         st.error("오답 ❌")
                         if target not in qs["wrong_words"]: 
                             qs["wrong_words"].append(target)
-                            save_wrong_word_db(user_id, target) # DB 저장
+                            save_wrong_word_db(user_id, target)
                             
                     time.sleep(0.5)
                     if qs["current_idx"]+1 < total:
@@ -427,7 +451,7 @@ elif current_level:
                         st.error("오답 ❌")
                         if target not in qs["wrong_words"]:
                             qs["wrong_words"].append(target)
-                            save_wrong_word_db(user_id, target) # DB 저장
+                            save_wrong_word_db(user_id, target)
                             
                     time.sleep(0.5)
                     if qs["current_idx"]+1 < total:
@@ -450,6 +474,11 @@ elif current_level:
             st.success("🎉 오늘의 학습 완료!")
             
             if st.button("완료 및 메인으로"):
-                complete_daily_mission(user_id) # 학습 완료 DB 기록
-                st.session_state.clear()
+                complete_daily_mission(user_id)
+                
+                # [수정 3] 전체 세션 초기화 대신, 학습 관련 세션만 삭제하여 로그아웃 방지
+                for key in ["mission", "step", "word_audios", "quiz_state"]:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                
                 st.rerun()
