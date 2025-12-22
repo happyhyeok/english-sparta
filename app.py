@@ -320,9 +320,16 @@ elif current_level:
         
         if not st.session_state.word_audios:
             pb = st.progress(0, "발음 준비 중...")
+            total_words = len(mission['words'])  # 1. 실제 단어 개수 확인
+            
             for i, w in enumerate(mission['words']):
                 st.session_state.word_audios[i] = generate_tts(w['en'])
-                pb.progress((i+1)/20)
+                
+                # 2. 실제 개수 기준으로 비율 계산 및 1.0 초과 방지
+                prog_val = (i + 1) / total_words
+                if prog_val > 1.0: prog_val = 1.0
+                pb.progress(prog_val)
+                
             pb.empty()
             
         with st.container(border=True):
