@@ -161,16 +161,18 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
+    # [수정 1] 문법 설명을 아주 상세하게 하도록 프롬프트 강화
     prompt = f"""
     중학생 레벨 '{level}'용 영어 학습 JSON을 생성하세요.
-    **중요: 'topic'을 제외한 모든 설명(문법 제목, 문법 설명, 힌트 등)은 반드시 '한국어'로 작성해야 합니다.**
+    **중요: 'topic'을 제외한 모든 설명은 반드시 '한국어'로 작성해야 합니다.**
+    **문법 설명은 중학생이 이해하기 쉽게 아주 구체적이고 상세하게 작성하세요. (Why, How 포함)**
     
     Output JSON Schema:
     {{
         "topic": "English Topic Name",
         "grammar": {{
-            "title": "문법 제목 (반드시 한국어로)",
-            "description": "문법에 대한 쉬운 설명 (반드시 한국어로 작성)",
+            "title": "문법 제목 (한국어)",
+            "description": "문법 상세 설명 (한국어). 이 문법을 언제 쓰는지, 형태는 어떤지, 주의할 점(3인칭 단수 등)을 줄글과 불렛포인트로 자세히 설명.",
             "rule": "공식 (영어)",
             "example": "예문 (영어)"
         }},
@@ -208,15 +210,27 @@ def transcribe_audio(audio_bytes):
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
 def evaluate_practice(target, user_input):
+    # [수정 3] 관사(an) 및 상세 오류 지적을 위한 프롬프트 강화
     prompt = f"""
     목표 문장: '{target}'
     학생 답변: '{user_input}'
     
-    역할: 당신은 친절한 영어 선생님입니다.
-    1. 의미가 일치하면 'PASS'라고만 출력하세요. (철자가 약간 틀려도 의미가 통하면 PASS)
-    2. 의미가 다르거나 문법적으로 틀렸다면 'FAIL'과 함께 이유를 한글로 구체적으로 설명하세요.
-    3. **중요:** 문법 오류 시, 단순히 정답만 알려주지 말고 문법 용어를 사용하여 이유를 설명해주세요.
-       예시: "주어가 3인칭 단수(She)이므로 동사 go에 es를 붙여 goes가 되어야 합니다."
+    역할: 당신은 꼼꼼하고 친절한 중학 영어 선생님입니다.
+    
+    채점 기준:
+    1. 의미가 통하면 'PASS'입니다. (사소한 철자 실수 허용)
+    2. 문법적으로 틀리거나 의미가 다르면 'FAIL'입니다.
+    
+    **피드백 지침 (FAIL인 경우):**
+    - 단순히 정답만 알려주지 마세요.
+    - **관사(a/an/the)**: 왜 'a'가 아니고 'an'인지(모음 발음 앞 등), 왜 'the'가 필요한지 구체적으로 설명하세요.
+    - **수 일치**: 3인칭 단수 주어일 때 왜 동사가 변하는지 설명하세요.
+    - **시제**: 현재/과거 시제 차이를 설명하세요.
+    - 설명은 반드시 **한국어**로, 학생이 이해하기 쉽게 작성하세요.
+    
+    출력 형식:
+    - 정답이면: PASS
+    - 오답이면: FAIL [구체적인 한국어 피드백]
     """
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
     return res.choices[0].message.content
@@ -340,11 +354,11 @@ elif current_level:
         with st.container(border=True):
             gr = mission['grammar']
             st.subheader(f"📘 {gr['title']}")
+            # 상세한 설명이 출력됨
             st.markdown(gr['description'])
             st.info(f"공식: {gr.get('rule','')}")
             st.markdown(f"예시: *{gr['example']}*")
         
-        # [수정] 에러 해결을 위해 with c1: 구문 제거 후 직접 메소드 사용
         for i, w in enumerate(mission['words']):
             c1, c2 = st.columns([4,1])
             c1.markdown(f"**{i+1}. {w['en']}** ({w['ko']})")
@@ -377,7 +391,8 @@ elif current_level:
                 aud = audio_recorder(text="", key=f"p_rec_{idx}")
                 if aud: user_res = transcribe_audio(aud)
             with c_txt:
-                with st.form(f"p_form_{idx}"):
+                # [수정 2] clear_on_submit=True 추가하여 제출 후 입력창 비움
+                with st.form(f"p_form_{idx}", clear_on_submit=True):
                     inp = st.text_input("입력", key=f"p_inp_{idx}")
                     if st.form_submit_button("제출"): user_res = inp
             
@@ -386,7 +401,7 @@ elif current_level:
                 if user_res.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
                     st.success("정답! 🎉")
                 else:
-                    with st.spinner("채점 및 분석 중..."):
+                    with st.spinner("채점 및 상세 분석 중..."):
                         res = evaluate_practice(q['en'], user_res)
                     
                     if "PASS" in res:
@@ -394,6 +409,7 @@ elif current_level:
                         st.caption(res.replace("PASS",""))
                     else:
                         st.error("오답 ❌")
+                        # 상세 피드백 출력
                         st.warning(res.replace("FAIL","").strip())
                         
         if st.button("실전 퀴즈 도전 ⚔️", type="primary"):
