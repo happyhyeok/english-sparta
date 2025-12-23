@@ -1,5 +1,5 @@
 import streamlit as st
-import requests  # 라이브러리 충돌 방지용 직통 연결
+import requests
 import json
 import random
 import time
@@ -110,15 +110,14 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심] 자동 모델 찾기 함수 (에러 해결!)
+# [핵심] 자동 모델 찾기 함수
 def generate_curriculum(level):
-    # 선생님의 API 키에서 가능한 모델들을 순서대로 시도합니다.
     model_candidates = [
         "gemini-1.5-flash",       # 표준
-        "gemini-1.5-flash-002",   # 최신 안정 버전
+        "gemini-1.5-flash-002",   # 최신 안정
         "gemini-1.5-flash-001",   # 구버전
-        "gemini-flash-latest",    # 최신 별칭
-        "gemini-pro"              # 1.0 Pro (최후의 수단)
+        "gemini-flash-latest",    # 별칭
+        "gemini-pro"              # 1.0 Pro
     ]
     
     headers = {'Content-Type': 'application/json'}
@@ -135,27 +134,20 @@ def generate_curriculum(level):
         "generationConfig": {"response_mime_type": "application/json"}
     }
     
-    # 반복문을 돌면서 성공할 때까지 시도
     for model_name in model_candidates:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
         try:
             response = requests.post(url, headers=headers, json=payload)
-            
-            # 성공(200 OK)하면 바로 리턴하고 종료!
             if response.status_code == 200:
                 result = response.json()
                 text_content = result['candidates'][0]['content']['parts'][0]['text']
                 return json.loads(text_content)
             else:
-                # 실패하면 로그만 찍고 다음 모델로 넘어감
-                print(f"⚠️ {model_name} 연결 실패: {response.status_code}")
                 continue 
-                
         except Exception:
             continue
             
-    # 모든 모델이 다 실패했을 경우에만 에러 표시
-    st.error("❌ 모든 AI 모델 연결에 실패했습니다. (API Key 할당량 또는 권한 문제)")
+    st.error("❌ 모든 AI 모델 연결에 실패했습니다.")
     return None
 
 def transcribe_audio(audio_bytes):
@@ -164,19 +156,55 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
+# [중요 변경] 교수법이 적용된 강력한 피드백 프롬프트
 def evaluate_practice(target, user_input):
-    prompt = f"Goal: '{target}', Input: '{user_input}'. If meaning matches, output 'PASS'. Else 'FAIL' with specific Korean feedback (include reasons like article, tense, etc)."
-    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}])
-    return res.choices[0].message.content
+    prompt = f"""
+    You are an expert English teacher for Korean middle school students.
+    Your task is to analyze the student's input against the target sentence and provide specific, helpful feedback in **KOREAN**.
+
+    Target Sentence: "{target}"
+    Student Input: "{user_input}"
+
+    **Analysis Guidelines (SLA-based):**
+    1. **Strict Language Policy:** ALL output (explanation, feedback) MUST be in **Korean** (한국어). Never use English for explanations.
+    2. **Hallucination Check:** Before giving feedback, strictly compare word-by-word. Do not claim a word is missing if it is present.
+    3. **Error Prioritization:**
+       - **Meaning/Vocab:** If the wrong word is used, correct it first.
+       - **Grammar (Syntax):** Check Word Order > Prepositions > Articles > Tense > Subject-Verb Agreement.
+       - **Spelling:** Minor typos are acceptable if meaning is clear -> Output 'PASS' but mention the typo gently.
+
+    **Output Rules:**
+    - If the sentence is correct (or close enough): Output just 'PASS'.
+    - If incorrect: Output 'FAIL' followed by a detailed explanation in Korean.
+    
+    **Feedback Structure (for FAIL):**
+    - 🚨 **오류 지적:** (Example: "전치사 'in'이 빠졌어요.")
+    - 💡 **이유 설명:** Explain the grammar rule simply. (Example: "장소를 나타낼 때는 앞에 'in'을 써야 해요.")
+    - ✨ **정답 유도:** Encourage them to try again.
+
+    OUTPUT FORMAT:
+    PASS
+    or
+    FAIL [Your Korean Feedback Here]
+    """
+    
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[{"role":"system", "content":prompt}],
+            temperature=0.3 # 창의성 낮춤 -> 정확도 향상
+        )
+        return res.choices[0].message.content
+    except Exception as e:
+        return f"FAIL 채점 중 오류가 발생했습니다: {str(e)}"
 
 # ==========================================
 # 3. 메인 화면
 # ==========================================
 st.title("🏫 AI 중학 영어 스파르타")
 
-# 상단에 진단용 확장 메뉴 추가 (문제 발생 시 확인용)
+# 진단 도구
 with st.expander("🛠️ API 연결 문제 해결 도구", expanded=False):
-    st.info("미션 생성이 안 될 때만 눌러보세요.")
     if st.button("내 API 키로 가능한 모델 확인하기"):
         try:
             test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
@@ -316,8 +344,6 @@ with tab4:
         total = len(words)
         curr = qs["current_idx"]
         target = words[curr]
-        
-        # [수정 완료된 부분] f-string 닫기 추가
         st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
         
         if qs["phase"] == "mc":
