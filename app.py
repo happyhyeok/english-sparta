@@ -15,14 +15,13 @@ from datetime import date
 # ==========================================
 st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
-# CSS: 탭 가독성 향상
+# CSS: 탭 가독성 향상 및 알림창 스타일
 st.markdown("""
 <style>
     .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
         font-size: 1.1rem;
         font-weight: bold;
     }
-    .stAlert { padding: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,11 +40,11 @@ client = OpenAI(api_key=openai_api_key)
 supabase: Client = create_client(supabase_url, supabase_key)
 genai.configure(api_key=google_api_key)
 
-# 세션 상태 초기화 (데이터 보존용)
+# 세션 상태 초기화
 if "user_level" not in st.session_state: st.session_state.user_level = None 
 if "mission" not in st.session_state: st.session_state.mission = None
-if "audio_cache" not in st.session_state: st.session_state.audio_cache = {} # TTS 캐시
-if "practice_results" not in st.session_state: st.session_state.practice_results = {} # [NEW] 문장 연습 결과 저장
+if "audio_cache" not in st.session_state: st.session_state.audio_cache = {} # TTS 캐싱 (속도)
+if "practice_results" not in st.session_state: st.session_state.practice_results = {} # 채점 결과 보존
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
         "phase": "ready", "current_idx": 0, "shuffled_words": [], 
@@ -122,57 +121,43 @@ def run_level_test_ai(text):
     return res.choices[0].message.content.strip()
 
 def generate_curriculum(level):
-    target_model = "gemini-1.5-flash" 
+    # [핵심] 여러 모델 이름을 순서대로 시도하여 404/429 에러 방지
+    model_candidates = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-001",
+        "gemini-pro" # 최후의 보루 (가장 안정적)
+    ]
     
-    try:
-        model = genai.GenerativeModel(
-            model_name=target_model, 
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        prompt = f"""
-        Create a JSON curriculum for Korean middle schooler level '{level}'.
-        Topic in English. Grammar explanations MUST be in Korean (Detailed, Why & How).
-        
-        Output JSON Schema:
-        {{
-            "topic": "English Topic Name",
-            "grammar": {{
-                "title": "문법 제목 (한국어)",
-                "description": "문법 상세 설명 (한국어). 줄글과 불렛포인트 활용하여 가독성 높게.",
-                "rule": "Rule (English)",
-                "example": "Example (English)"
-            }},
-            "words": [
-                {{ "en": "English Word", "ko": "한국어 뜻" }}, 
-                ... (20 items)
-            ],
-            "practice_sentences": [
-                {{ 
-                    "ko": "한글 문장", 
-                    "en": "English Sentence", 
-                    "hint_structure": "구조 힌트 (한국어)", 
-                    "hint_grammar": "문법 힌트 (한국어)" 
-                }},
-                ... (20 items)
-            ]
-        }}
-        
-        Create exactly 20 words and 20 sentences.
-        """
-        
-        response = model.generate_content(prompt)
-        return json.loads(response.text)
-        
-    except Exception as e:
-        # 1.5 Flash가 안될 경우 1.5 Pro로 시도 (비상용)
+    prompt = f"""
+    Create a JSON curriculum for Korean middle schooler level '{level}'.
+    Topic in English. Grammar explanations MUST be in Korean (Detailed, Why & How).
+    Output JSON: {{ "topic": "...", "grammar": {{ "title": "...", "description": "...", "rule": "...", "example": "..." }}, "words": [{{ "en": "...", "ko": "..." }}], "practice_sentences": [{{ "ko": "...", "en": "...", "hint_structure": "...", "hint_grammar": "..." }}] }}
+    Create exactly 20 words and 20 sentences.
+    """
+
+    for model_name in model_candidates:
         try:
-            fallback_model = genai.GenerativeModel("gemini-1.5-pro", generation_config={"response_mime_type": "application/json"})
-            response = fallback_model.generate_content(prompt)
-            return json.loads(response.text)
-        except:
-            st.error(f"커리큘럼 생성 실패 (API Quota): {e}")
-            return None
+            # JSON 모드 설정 (gemini-pro는 지원 안 할 수 있어 예외처리)
+            config = {"response_mime_type": "application/json"} if "flash" in model_name else {}
+            model = genai.GenerativeModel(model_name=model_name, generation_config=config)
+            
+            response = model.generate_content(prompt)
+            
+            # 응답 텍스트 파싱
+            txt = response.text
+            # 마크다운 json 태그 제거 (gemini-pro 대응)
+            if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
+            elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
+            
+            return json.loads(txt) # 성공하면 리턴
+            
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}")
+            continue # 다음 모델 시도
+            
+    st.error("모든 AI 모델 연결에 실패했습니다. 잠시 후 다시 시도해주세요.")
+    return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -228,7 +213,7 @@ if not st.session_state.mission:
             st.session_state.mission = mission_data
             status.update(label="준비 완료!", state="complete", expanded=False)
         else:
-            st.error("생성 실패. 잠시 후 다시 시도해주세요.")
+            status.update(label="오류 발생", state="error")
             st.stop()
 
 mission = st.session_state.mission
@@ -240,7 +225,7 @@ st.caption(f"Level: {current_level}")
 # ==========================================
 tab1, tab2, tab3, tab4 = st.tabs(["📘 오늘의 문법", "🍎 오늘의 단어", "✍️ 문장 연습", "⚔️ 실전 테스트"])
 
-# --- Tab 1: 오늘의 문법 (음성 설명 추가) ---
+# --- Tab 1: 오늘의 문법 ---
 with tab1:
     gr = mission['grammar']
     st.subheader(gr['title'])
@@ -267,28 +252,30 @@ with tab2:
                 audio = get_audio_bytes(w['en'])
                 if audio: st.audio(audio, format='audio/mp3', autoplay=True)
 
-# --- Tab 3: 문장 연습 (캐싱을 통한 속도 개선 핵심) ---
+# --- Tab 3: 문장 연습 (데이터 보존 로직 적용) ---
 with tab3:
     st.markdown("### 문장 만들기 연습")
     st.caption("AI 선생님이 실시간으로 피드백을 드려요!")
     
     for idx, q in enumerate(mission['practice_sentences']):
-        # 결과가 이미 있으면(채점 완료) 성공/실패 메시지를 바로 보여줌 (API 호출 X)
         result_key = f"res_{idx}"
+        # 정답 여부에 따라 Expander 열기/닫기 조절
+        is_solved = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
         
-        with st.expander(f"Q{idx+1}. {q['ko']}", expanded=(result_key not in st.session_state.practice_results)):
+        with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_solved):
             st.caption(f"힌트: {q.get('hint_structure','')} | {q.get('hint_grammar','')}")
             
-            # 이미 채점된 결과가 있는지 확인
+            # 저장된 결과 확인
             cached_res = st.session_state.practice_results.get(result_key)
             
+            # 정답인 경우
             if cached_res and cached_res['status'] == 'PASS':
                 st.success(f"✅ 정답! : {cached_res['input']}")
                 if st.button("다시 하기", key=f"retry_{idx}"):
                     del st.session_state.practice_results[result_key]
                     st.rerun()
             else:
-                # 입력 폼
+                # 문제 풀이 영역
                 col_mic, col_input = st.columns([1, 4])
                 user_input = None
                 
@@ -301,17 +288,17 @@ with tab3:
                         txt_val = st.text_input("영어 문장 입력", key=f"prac_txt_{idx}")
                         if st.form_submit_button("제출"): user_input = txt_val
                 
-                # 이전 오답 기록 보여주기 (있다면)
+                # 오답 피드백 표시 (저장된 내용)
                 if cached_res and cached_res['status'] == 'FAIL':
-                    st.error(f"❌ 오답: {cached_res['input']}")
+                    st.error(f"❌ 입력: {cached_res['input']}")
                     st.warning(cached_res['feedback'])
 
-                # 새 입력 처리
+                # 새로운 입력 처리
                 if user_input:
-                    # 간단한 전처리 정답 체크
+                    # 정답 체크
                     if user_input.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
                         st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_input}
-                        st.rerun() # 저장 후 즉시 화면 갱신
+                        st.rerun()
                     else:
                         with st.spinner("채점 중..."):
                             res = evaluate_practice(q['en'], user_input)
@@ -321,8 +308,7 @@ with tab3:
                         else:
                             feedback = res.replace("FAIL", "").strip()
                             st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_input, 'feedback': feedback}
-                        
-                        st.rerun() # 결과 저장 후 화면 갱신
+                        st.rerun()
 
 # --- Tab 4: 실전 테스트 ---
 with tab4:
@@ -340,7 +326,6 @@ with tab4:
         st.success(f"🎉 {qs['loop_count']}회차 학습 완료!")
         if st.button("학습 종료 및 메인으로"):
             complete_daily_mission(user_id)
-            # 상태 초기화
             for key in ["mission", "audio_cache", "quiz_state", "practice_results"]: 
                 if key in st.session_state: del st.session_state[key]
             st.rerun()
