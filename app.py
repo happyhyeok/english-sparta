@@ -15,12 +15,18 @@ from supabase import create_client, Client
 # ==========================================
 st.set_page_config(page_title="AI 중학 영어 스파르타", layout="centered")
 
-# CSS
+# CSS 스타일 정의
 st.markdown("""
 <style>
     .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
         font-size: 1.1rem;
         font-weight: bold;
+    }
+    /* 문장 연습 시 폼 테두리 등을 깔끔하게 */
+    div[data-testid="stForm"] {
+        border: 1px solid #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -43,7 +49,7 @@ supabase: Client = create_client(supabase_url, supabase_key)
 if "user_level" not in st.session_state: st.session_state.user_level = None 
 if "mission" not in st.session_state: st.session_state.mission = None
 if "audio_cache" not in st.session_state: st.session_state.audio_cache = {}
-if "practice_results" not in st.session_state: st.session_state.practice_results = {}
+if "practice_results" not in st.session_state: st.session_state.practice_results = {} # 채점 결과 저장
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
         "phase": "ready", "current_idx": 0, "shuffled_words": [], 
@@ -110,15 +116,11 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [중요 변경] 힌트 생성 프롬프트 대폭 강화 (영어 어순 강제)
+# [유지] 힌트 및 문법 설명 프롬프트 (영어 어순 강제)
 def generate_curriculum(level):
-    model_candidates = [
-        "gemini-1.5-flash", "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-flash-latest", "gemini-pro"
-    ]
-    
+    model_candidates = ["gemini-1.5-flash", "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-flash-latest", "gemini-pro"]
     headers = {'Content-Type': 'application/json'}
     
-    # 힌트 생성 규칙을 구체적으로 명시
     prompt_text = f"""
     You are an expert English Curriculum Designer for Korean Middle School students.
     Create a JSON curriculum for level '{level}'.
@@ -153,10 +155,7 @@ def generate_curriculum(level):
     Create exactly 20 words and 20 sentences.
     """
     
-    payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
+    payload = { "contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"response_mime_type": "application/json"} }
     
     for model_name in model_candidates:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
@@ -166,10 +165,8 @@ def generate_curriculum(level):
                 result = response.json()
                 text_content = result['candidates'][0]['content']['parts'][0]['text']
                 return json.loads(text_content)
-            else:
-                continue 
-        except Exception:
-            continue
+            else: continue 
+        except Exception: continue
             
     st.error("❌ 모든 AI 모델 연결에 실패했습니다.")
     return None
@@ -180,56 +177,39 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-# [유지] 강화된 피드백 프롬프트
+# [유지] 피드백 프롬프트
 def evaluate_practice(target, user_input):
     prompt = f"""
     You are an expert English teacher for Korean middle school students.
-    Your task is to analyze the student's input against the target sentence and provide specific, helpful feedback in **KOREAN**.
+    Task: Analyze student input vs target sentence. Provide specific feedback in **KOREAN**.
 
-    Target Sentence: "{target}"
+    Target: "{target}"
     Student Input: "{user_input}"
 
-    **Analysis Guidelines:**
-    1. **Strict Language Policy:** ALL output MUST be in **Korean**.
-    2. **Hallucination Check:** Do not claim a word is missing if it is present.
-    3. **Error Prioritization:** Wrong Word > Word Order > Prepositions > Articles > Tense.
-    4. **Spelling:** Minor typos -> PASS but mention it.
+    Guidelines:
+    1. Language: ALL output in Korean.
+    2. Hallucination: Do NOT claim a word is missing if present.
+    3. Priorities: Wrong Word > Word Order > Prepositions > Articles > Tense.
+    4. Spelling: Minor typos -> PASS.
 
     Output Rules:
-    - If correct: Output 'PASS'.
-    - If incorrect: Output 'FAIL' followed by detailed explanation.
+    - Correct: Output 'PASS'.
+    - Incorrect: Output 'FAIL' followed by detailed explanation.
     
     Format:
     PASS
     or
     FAIL [Korean Feedback]
     """
-    
     try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini", 
-            messages=[{"role":"system", "content":prompt}],
-            temperature=0.3
-        )
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.3)
         return res.choices[0].message.content
-    except Exception as e:
-        return f"FAIL 채점 중 오류가 발생했습니다: {str(e)}"
+    except Exception as e: return f"FAIL 오류: {str(e)}"
 
 # ==========================================
 # 3. 메인 화면
 # ==========================================
 st.title("🏫 AI 중학 영어 스파르타")
-
-# 진단 도구
-with st.expander("🛠️ API 연결 문제 해결 도구", expanded=False):
-    if st.button("내 API 키로 가능한 모델 확인하기"):
-        try:
-            test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
-            res = requests.get(test_url).json()
-            models = [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
-            st.success(f"사용 가능 모델: {', '.join(models)}")
-        except Exception as e:
-            st.error(f"확인 실패: {e}")
 
 with st.sidebar:
     st.header("🔑 로그인")
@@ -245,6 +225,7 @@ current_level = user_data.get('current_level')
 total_complete = user_data.get('total_complete_count', 0)
 last_test_cnt = user_data.get('last_test_count', 0)
 
+# 레벨 테스트 로직
 if current_level is None or (total_complete - last_test_cnt) >= 5:
     st.subheader("📝 레벨 테스트")
     st.write("Q. What do you usually do on weekends?")
@@ -260,6 +241,7 @@ if current_level is None or (total_complete - last_test_cnt) >= 5:
             st.rerun()
     st.stop()
 
+# 미션 생성 로직
 if not st.session_state.mission:
     with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini Auto-Detect)", expanded=True) as status:
         mission_data = generate_curriculum(current_level)
@@ -274,6 +256,7 @@ mission = st.session_state.mission
 st.header(f"Topic: {mission['topic']}")
 st.caption(f"Level: {current_level}")
 
+# 탭 구성
 tab1, tab2, tab3, tab4 = st.tabs(["📘 오늘의 문법", "🍎 오늘의 단어", "✍️ 문장 연습", "⚔️ 실전 테스트"])
 
 with tab1:
@@ -300,48 +283,70 @@ with tab2:
                 audio = get_audio_bytes(w['en'])
                 if audio: st.audio(audio, format='audio/mp3', autoplay=True)
 
+# [핵심 변경] Tab 3: 리로딩 없는 안정적인 폼 구조
 with tab3:
-    st.markdown("### 문장 만들기 연습")
+    st.markdown("### ✍️ 문장 만들기 연습")
+    st.caption("힌트를 보고 문장을 완성하세요. 틀리면 내용을 수정해서 다시 제출하면 됩니다.")
+    
     for idx, q in enumerate(mission['practice_sentences']):
-        result_key = f"res_{idx}"
-        is_solved = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
+        # 고유 키 생성
+        result_key = f"res_{idx}" # 결과 저장 키
+        input_key = f"input_{idx}" # 입력 텍스트 키
         
-        with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_solved):
-            # [수정] 힌트 표시 부분: 구조 힌트가 영어 어순으로 나오도록 개선
+        # 정답을 맞췄으면 자동으로 Expander가 닫히게 하거나, 초록색으로 표시
+        is_pass = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
+        
+        # Expander: 정답을 맞추면 접어두기 (가독성), 아니면 펼쳐두기
+        with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_pass):
             st.caption(f"💡 구조: {q.get('hint_structure','')} | 🔑 문법: {q.get('hint_grammar','')}")
             
-            cached_res = st.session_state.practice_results.get(result_key)
-            if cached_res and cached_res['status'] == 'PASS':
-                st.success(f"✅ 정답! : {cached_res['input']}")
-                if st.button("다시 하기", key=f"retry_{idx}"):
-                    del st.session_state.practice_results[result_key]
-                    st.rerun()
-            else:
-                col_mic, col_input = st.columns([1, 4])
-                user_input = None
-                with col_mic:
-                    aud = audio_recorder(text="", key=f"prac_mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
-                    if aud: user_input = transcribe_audio(aud)
-                with col_input:
-                    with st.form(f"prac_form_{idx}", clear_on_submit=True):
-                        txt_val = st.text_input("영어 문장 입력", key=f"prac_txt_{idx}")
-                        if st.form_submit_button("제출"): user_input = txt_val
+            # 음성 입력 처리
+            # 마이크는 폼 외부에 두어 오디오 데이터 처리가 폼 제출과 꼬이지 않게 함
+            mic_col, _ = st.columns([1, 5])
+            with mic_col:
+                audio_val = audio_recorder(text="", key=f"mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
+            
+            # 오디오가 들어오면 세션 스테이트(입력창)에 값 업데이트
+            if audio_val:
+                transcribed_text = transcribe_audio(audio_val)
+                st.session_state[input_key] = transcribed_text
+                st.rerun() # 텍스트박스에 글자를 보여주기 위해 여기서만 살짝 리런
+
+            # 메인 입력 폼
+            with st.form(key=f"form_p_{idx}"):
+                # 텍스트 입력창 (세션 스테이트와 연동하여 값 유지)
+                user_val = st.text_input("영어 문장 입력", key=input_key)
                 
-                if cached_res and cached_res['status'] == 'FAIL':
-                    st.error(f"❌ 입력: {cached_res['input']}")
-                    st.warning(cached_res['feedback'])
-                if user_input:
-                    if user_input.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
-                        st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_input}
-                        st.rerun()
+                # 제출 버튼
+                submit_btn = st.form_submit_button("제출 및 채점")
+                
+                if submit_btn:
+                    if not user_val.strip():
+                        st.warning("내용을 입력해주세요.")
                     else:
-                        with st.spinner("채점 중..."):
-                            res = evaluate_practice(q['en'], user_input)
-                        if "PASS" in res:
-                            st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_input}
+                        # 정답 체크 (간단한 전처리)
+                        if user_val.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
+                            st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
                         else:
-                            st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_input, 'feedback': res.replace("FAIL", "").strip()}
-                        st.rerun()
+                            with st.spinner("AI 선생님이 채점 중입니다..."):
+                                feedback_res = evaluate_practice(q['en'], user_val)
+                            
+                            if "PASS" in feedback_res:
+                                st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
+                            else:
+                                clean_feedback = feedback_res.replace("FAIL", "").strip()
+                                st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': clean_feedback}
+            
+            # 폼 바로 아래에 결과 표시 (리로딩 없이 즉시 렌더링됨)
+            if result_key in st.session_state.practice_results:
+                res_data = st.session_state.practice_results[result_key]
+                
+                if res_data['status'] == 'PASS':
+                    st.success(f"🎉 정답입니다! : {res_data['input']}")
+                else:
+                    st.error(f"❌ 다시 시도해보세요!")
+                    st.info(f"💡 피드백: {res_data['feedback']}")
+                    # 틀려도 입력창(user_val)은 유지되므로 바로 수정 가능
 
 with tab4:
     qs = st.session_state.quiz_state
