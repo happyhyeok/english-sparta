@@ -1,14 +1,14 @@
 import streamlit as st
-import requests  # 구글 서버 통신용
+import requests
+import json
+import random
+import time
+from datetime import date
+import datetime
 from openai import OpenAI
 from audio_recorder_streamlit import audio_recorder
 import streamlit.components.v1 as components
 from supabase import create_client, Client
-import json
-import random
-import time
-import datetime
-from datetime import date
 
 # ==========================================
 # 1. 환경 설정 및 초기화
@@ -51,7 +51,27 @@ if "quiz_state" not in st.session_state:
     }
 
 # ==========================================
-# 2. DB 및 유틸리티 함수
+# 🚨 [긴급 진단] API 키 및 연결 상태 확인
+# ==========================================
+with st.expander("🔧 API 연결 상태 진단 (문제 발생 시 확인용)", expanded=False):
+    st.write("구글 서버에 직접 연결을 시도합니다...")
+    test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
+    try:
+        test_res = requests.get(test_url)
+        if test_res.status_code == 200:
+            st.success("✅ Google API 연결 성공! (키 정상)")
+            # 사용 가능한 모델 목록 출력
+            models = [m['name'] for m in test_res.json().get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+            st.json(models)
+        else:
+            st.error(f"❌ 연결 실패! 상태 코드: {test_res.status_code}")
+            st.code(test_res.text, language="json")
+            st.warning("위 에러 메시지를 확인해주세요. 'API_KEY_INVALID' 또는 'PERMISSION_DENIED'가 보이면 키 문제입니다.")
+    except Exception as e:
+        st.error(f"통신 오류: {str(e)}")
+
+# ==========================================
+# 2. 유틸리티 함수
 # ==========================================
 def get_user_data(user_id):
     response = supabase.table("users").select("*").eq("user_id", user_id).execute()
@@ -70,14 +90,12 @@ def update_attendance(user_id):
     today_str = date.today().isoformat()
     last_visit = user.get("last_visit_date")
     streak = user.get("streak", 0)
-    
     if last_visit != today_str:
         if last_visit:
             delta = (date.today() - datetime.date.fromisoformat(last_visit)).days
             streak = streak + 1 if delta == 1 else 1
         else: streak = 1
         supabase.table("users").update({ "last_visit_date": today_str, "streak": streak }).eq("user_id", user_id).execute()
-    
     return streak
 
 def complete_daily_mission(user_id):
@@ -97,8 +115,6 @@ def update_level_and_test_log(user_id, new_level):
     cnt = get_user_data(user_id).get("total_complete_count", 0)
     supabase.table("users").update({ "current_level": new_level, "last_test_count": cnt }).eq("user_id", user_id).execute()
 
-# --- AI 관련 함수 ---
-
 def get_audio_bytes(text):
     if text in st.session_state.audio_cache: return st.session_state.audio_cache[text]
     try:
@@ -111,22 +127,13 @@ def set_focus_js():
     components.html("""<script>setTimeout(function() { var inputs = window.parent.document.querySelectorAll("input[type=text]"); if (inputs.length > 0) { inputs[inputs.length - 1].focus(); } }, 100);</script>""", height=0)
 
 def run_level_test_ai(text):
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}]
-    )
+    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심] 만능 연결 함수: 여러 모델 이름을 순서대로 시도
+# [핵심] Gemini 연결 함수 (상세 에러 출력 포함)
 def generate_curriculum(level):
-    # 시도할 모델 목록 (우선순위 순)
-    model_candidates = [
-        "gemini-1.5-flash-latest", # 가장 최신 Flash
-        "gemini-1.5-flash",        # 기본 Flash
-        "gemini-1.5-flash-001",    # 특정 버전 Flash
-        "gemini-pro"               # 최후의 수단 (Pro 모델)
-    ]
-    
+    # 가장 기본적이고 확실한 모델 1.5 Flash 사용
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={google_api_key}"
     headers = {'Content-Type': 'application/json'}
     
     prompt_text = f"""
@@ -141,29 +148,20 @@ def generate_curriculum(level):
         "generationConfig": {"response_mime_type": "application/json"}
     }
     
-    # 모델 하나씩 순서대로 시도
-    for model_name in model_candidates:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
+    try:
+        response = requests.post(url, headers=headers, json=payload)
         
-        try:
-            response = requests.post(url, headers=headers, json=payload)
-            
-            if response.status_code == 200:
-                # 성공!
-                result = response.json()
-                text_content = result['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(text_content)
-            else:
-                # 실패하면 다음 모델 시도 (로그만 찍음)
-                print(f"Failed {model_name}: {response.status_code}")
-                continue
-                
-        except Exception:
-            continue
-            
-    # 모든 모델이 실패한 경우
-    st.error("모든 AI 모델 연결에 실패했습니다. (API Key 권한 또는 할당량 확인 필요)")
-    return None
+        if response.status_code == 200:
+            result = response.json()
+            return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
+        else:
+            # 🚨 에러 발생 시 상세 내용을 화면에 출력
+            st.error(f"Google API Error ({response.status_code}):")
+            st.json(response.json()) # 에러 JSON 전체 출력
+            return None
+    except Exception as e:
+        st.error(f"연결 예외 발생: {str(e)}")
+        return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -177,7 +175,7 @@ def evaluate_practice(target, user_input):
     return res.choices[0].message.content
 
 # ==========================================
-# 3. 메인 화면 구성
+# 3. 메인 화면
 # ==========================================
 st.title("🏫 AI 중학 영어 스파르타")
 
@@ -191,7 +189,6 @@ with st.sidebar:
         st.info(f"🏆 누적 완료: {user_data.get('total_complete_count', 0)}회")
     else: st.stop()
 
-# 레벨 테스트
 current_level = user_data.get('current_level')
 total_complete = user_data.get('total_complete_count', 0)
 last_test_cnt = user_data.get('last_test_count', 0)
@@ -211,7 +208,6 @@ if current_level is None or (total_complete - last_test_cnt) >= 5:
             st.rerun()
     st.stop()
 
-# 미션 생성
 if not st.session_state.mission:
     with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini)", expanded=True) as status:
         mission_data = generate_curriculum(current_level)
@@ -226,12 +222,8 @@ mission = st.session_state.mission
 st.header(f"Topic: {mission['topic']}")
 st.caption(f"Level: {current_level}")
 
-# ==========================================
-# 4. 탭 구조
-# ==========================================
 tab1, tab2, tab3, tab4 = st.tabs(["📘 오늘의 문법", "🍎 오늘의 단어", "✍️ 문장 연습", "⚔️ 실전 테스트"])
 
-# --- Tab 1 ---
 with tab1:
     gr = mission['grammar']
     st.subheader(gr['title'])
@@ -245,7 +237,6 @@ with tab1:
             audio = get_audio_bytes(tts_text)
             if audio: st.audio(audio, format='audio/mp3')
 
-# --- Tab 2 ---
 with tab2:
     st.info("💡 스피커를 누르면 발음을 들을 수 있어요.")
     for i, w in enumerate(mission['words']):
@@ -257,7 +248,6 @@ with tab2:
                 audio = get_audio_bytes(w['en'])
                 if audio: st.audio(audio, format='audio/mp3', autoplay=True)
 
-# --- Tab 3 ---
 with tab3:
     st.markdown("### 문장 만들기 연습")
     for idx, q in enumerate(mission['practice_sentences']):
@@ -266,7 +256,6 @@ with tab3:
         
         with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_solved):
             st.caption(f"힌트: {q.get('hint_structure','')} | {q.get('hint_grammar','')}")
-            
             cached_res = st.session_state.practice_results.get(result_key)
             if cached_res and cached_res['status'] == 'PASS':
                 st.success(f"✅ 정답! : {cached_res['input']}")
@@ -287,7 +276,6 @@ with tab3:
                 if cached_res and cached_res['status'] == 'FAIL':
                     st.error(f"❌ 입력: {cached_res['input']}")
                     st.warning(cached_res['feedback'])
-
                 if user_input:
                     if user_input.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
                         st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_input}
@@ -301,7 +289,6 @@ with tab3:
                             st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_input, 'feedback': res.replace("FAIL", "").strip()}
                         st.rerun()
 
-# --- Tab 4 ---
 with tab4:
     qs = st.session_state.quiz_state
     words = qs["shuffled_words"]
