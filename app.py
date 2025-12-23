@@ -117,10 +117,15 @@ def run_level_test_ai(text):
     )
     return res.choices[0].message.content.strip()
 
-# [핵심] 구글 API 직통 연결 함수
+# [핵심] 만능 연결 함수: 여러 모델 이름을 순서대로 시도
 def generate_curriculum(level):
-    # Gemini 1.5 Flash 엔드포인트
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={google_api_key}"
+    # 시도할 모델 목록 (우선순위 순)
+    model_candidates = [
+        "gemini-1.5-flash-latest", # 가장 최신 Flash
+        "gemini-1.5-flash",        # 기본 Flash
+        "gemini-1.5-flash-001",    # 특정 버전 Flash
+        "gemini-pro"               # 최후의 수단 (Pro 모델)
+    ]
     
     headers = {'Content-Type': 'application/json'}
     
@@ -132,27 +137,33 @@ def generate_curriculum(level):
     """
     
     payload = {
-        "contents": [{
-            "parts": [{"text": prompt_text}]
-        }],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {"response_mime_type": "application/json"}
     }
     
-    try:
-        response = requests.post(url, headers=headers, json=payload)
+    # 모델 하나씩 순서대로 시도
+    for model_name in model_candidates:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
         
-        if response.status_code == 200:
-            result = response.json()
-            text_content = result['candidates'][0]['content']['parts'][0]['text']
-            return json.loads(text_content)
-        else:
-            st.error(f"Google API Error: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"연결 실패: {str(e)}")
-        return None
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                # 성공!
+                result = response.json()
+                text_content = result['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(text_content)
+            else:
+                # 실패하면 다음 모델 시도 (로그만 찍음)
+                print(f"Failed {model_name}: {response.status_code}")
+                continue
+                
+        except Exception:
+            continue
+            
+    # 모든 모델이 실패한 경우
+    st.error("모든 AI 모델 연결에 실패했습니다. (API Key 권한 또는 할당량 확인 필요)")
+    return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -234,7 +245,7 @@ with tab1:
             audio = get_audio_bytes(tts_text)
             if audio: st.audio(audio, format='audio/mp3')
 
-# --- Tab 2 (에러가 났던 부분 수정 완료) ---
+# --- Tab 2 ---
 with tab2:
     st.info("💡 스피커를 누르면 발음을 들을 수 있어요.")
     for i, w in enumerate(mission['words']):
@@ -244,7 +255,6 @@ with tab2:
         with c3:
             if st.button("🔊", key=f"tts_w_{i}"):
                 audio = get_audio_bytes(w['en'])
-                # 아래 줄이 수정된 부분입니다.
                 if audio: st.audio(audio, format='audio/mp3', autoplay=True)
 
 # --- Tab 3 ---
