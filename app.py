@@ -1,5 +1,5 @@
 import streamlit as st
-import requests
+import requests  # 라이브러리 충돌 방지용 직통 연결
 import json
 import random
 import time
@@ -51,27 +51,7 @@ if "quiz_state" not in st.session_state:
     }
 
 # ==========================================
-# 🚨 [긴급 진단] API 키 및 연결 상태 확인
-# ==========================================
-with st.expander("🔧 API 연결 상태 진단 (문제 발생 시 확인용)", expanded=False):
-    st.write("구글 서버에 직접 연결을 시도합니다...")
-    test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
-    try:
-        test_res = requests.get(test_url)
-        if test_res.status_code == 200:
-            st.success("✅ Google API 연결 성공! (키 정상)")
-            # 사용 가능한 모델 목록 출력
-            models = [m['name'] for m in test_res.json().get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
-            st.json(models)
-        else:
-            st.error(f"❌ 연결 실패! 상태 코드: {test_res.status_code}")
-            st.code(test_res.text, language="json")
-            st.warning("위 에러 메시지를 확인해주세요. 'API_KEY_INVALID' 또는 'PERMISSION_DENIED'가 보이면 키 문제입니다.")
-    except Exception as e:
-        st.error(f"통신 오류: {str(e)}")
-
-# ==========================================
-# 2. 유틸리티 함수
+# 2. DB 및 유틸리티 함수
 # ==========================================
 def get_user_data(user_id):
     response = supabase.table("users").select("*").eq("user_id", user_id).execute()
@@ -130,10 +110,17 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심] Gemini 연결 함수 (상세 에러 출력 포함)
+# [핵심] 자동 모델 찾기 함수 (에러 해결!)
 def generate_curriculum(level):
-    # 가장 기본적이고 확실한 모델 1.5 Flash 사용
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={google_api_key}"
+    # 선생님의 API 키에서 가능한 모델들을 순서대로 시도합니다.
+    model_candidates = [
+        "gemini-1.5-flash",       # 표준
+        "gemini-1.5-flash-002",   # 최신 안정 버전
+        "gemini-1.5-flash-001",   # 구버전
+        "gemini-flash-latest",    # 최신 별칭
+        "gemini-pro"              # 1.0 Pro (최후의 수단)
+    ]
+    
     headers = {'Content-Type': 'application/json'}
     
     prompt_text = f"""
@@ -148,20 +135,28 @@ def generate_curriculum(level):
         "generationConfig": {"response_mime_type": "application/json"}
     }
     
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
-        else:
-            # 🚨 에러 발생 시 상세 내용을 화면에 출력
-            st.error(f"Google API Error ({response.status_code}):")
-            st.json(response.json()) # 에러 JSON 전체 출력
-            return None
-    except Exception as e:
-        st.error(f"연결 예외 발생: {str(e)}")
-        return None
+    # 반복문을 돌면서 성공할 때까지 시도
+    for model_name in model_candidates:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            
+            # 성공(200 OK)하면 바로 리턴하고 종료!
+            if response.status_code == 200:
+                result = response.json()
+                text_content = result['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(text_content)
+            else:
+                # 실패하면 로그만 찍고 다음 모델로 넘어감
+                print(f"⚠️ {model_name} 연결 실패: {response.status_code}")
+                continue 
+                
+        except Exception:
+            continue
+            
+    # 모든 모델이 다 실패했을 경우에만 에러 표시
+    st.error("❌ 모든 AI 모델 연결에 실패했습니다. (API Key 할당량 또는 권한 문제)")
+    return None
 
 def transcribe_audio(audio_bytes):
     import io
@@ -178,6 +173,18 @@ def evaluate_practice(target, user_input):
 # 3. 메인 화면
 # ==========================================
 st.title("🏫 AI 중학 영어 스파르타")
+
+# 상단에 진단용 확장 메뉴 추가 (문제 발생 시 확인용)
+with st.expander("🛠️ API 연결 문제 해결 도구", expanded=False):
+    st.info("미션 생성이 안 될 때만 눌러보세요.")
+    if st.button("내 API 키로 가능한 모델 확인하기"):
+        try:
+            test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
+            res = requests.get(test_url).json()
+            models = [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+            st.success(f"사용 가능 모델: {', '.join(models)}")
+        except Exception as e:
+            st.error(f"확인 실패: {e}")
 
 with st.sidebar:
     st.header("🔑 로그인")
@@ -209,7 +216,7 @@ if current_level is None or (total_complete - last_test_cnt) >= 5:
     st.stop()
 
 if not st.session_state.mission:
-    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini)", expanded=True) as status:
+    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini Auto-Detect)", expanded=True) as status:
         mission_data = generate_curriculum(current_level)
         if mission_data:
             st.session_state.mission = mission_data
@@ -309,42 +316,4 @@ with tab4:
         total = len(words)
         curr = qs["current_idx"]
         target = words[curr]
-        st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
-        
-        if qs["phase"] == "mc":
-            st.subheader(f"객관식: {target['en']}")
-            if qs["current_options"] is None:
-                opts = [target['ko']]
-                while len(opts) < 4:
-                    r = random.choice(mission['words'])['ko']
-                    if r not in opts: opts.append(r)
-                random.shuffle(opts)
-                qs["current_options"] = opts
-            with st.form(f"quiz_mc_{curr}"):
-                choice = st.radio("알맞은 뜻을 고르세요", qs["current_options"])
-                if st.form_submit_button("확인"):
-                    if choice == target['ko']: st.success("정답! ⭕")
-                    else:
-                        st.error(f"오답! 정답은 '{target['ko']}' 입니다.")
-                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
-                    time.sleep(0.5)
-                    qs["current_options"] = None
-                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
-                    else: qs["phase"] = "writing"; qs["current_idx"] = 0; random.shuffle(qs["shuffled_words"]); st.rerun()
-
-        elif qs["phase"] == "writing":
-            st.subheader(f"주관식: {target['ko']}")
-            set_focus_js()
-            with st.form(f"quiz_wr_{curr}", clear_on_submit=True):
-                inp = st.text_input("영어 단어를 입력하세요")
-                if st.form_submit_button("제출"):
-                    if inp.strip().lower() == target['en'].lower(): st.success("정답! ⭕")
-                    else:
-                        st.error(f"오답! 정답은 '{target['en']}' 입니다.")
-                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
-                    time.sleep(0.5)
-                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
-                    else:
-                        if qs["wrong_words"]:
-                            qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("🚨 틀린 문제 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
-                        else: qs["phase"] = "end"; st.rerun()
+        st.progress((curr + 1) / total, text=f"문제 {curr +
