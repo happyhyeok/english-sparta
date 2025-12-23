@@ -316,4 +316,44 @@ with tab4:
         total = len(words)
         curr = qs["current_idx"]
         target = words[curr]
-        st.progress((curr + 1) / total, text=f"문제 {curr +
+        
+        # [수정 완료된 부분] f-string 닫기 추가
+        st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
+        
+        if qs["phase"] == "mc":
+            st.subheader(f"객관식: {target['en']}")
+            if qs["current_options"] is None:
+                opts = [target['ko']]
+                while len(opts) < 4:
+                    r = random.choice(mission['words'])['ko']
+                    if r not in opts: opts.append(r)
+                random.shuffle(opts)
+                qs["current_options"] = opts
+            with st.form(f"quiz_mc_{curr}"):
+                choice = st.radio("알맞은 뜻을 고르세요", qs["current_options"])
+                if st.form_submit_button("확인"):
+                    if choice == target['ko']: st.success("정답! ⭕")
+                    else:
+                        st.error(f"오답! 정답은 '{target['ko']}' 입니다.")
+                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
+                    time.sleep(0.5)
+                    qs["current_options"] = None
+                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
+                    else: qs["phase"] = "writing"; qs["current_idx"] = 0; random.shuffle(qs["shuffled_words"]); st.rerun()
+
+        elif qs["phase"] == "writing":
+            st.subheader(f"주관식: {target['ko']}")
+            set_focus_js()
+            with st.form(f"quiz_wr_{curr}", clear_on_submit=True):
+                inp = st.text_input("영어 단어를 입력하세요")
+                if st.form_submit_button("제출"):
+                    if inp.strip().lower() == target['en'].lower(): st.success("정답! ⭕")
+                    else:
+                        st.error(f"오답! 정답은 '{target['en']}' 입니다.")
+                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
+                    time.sleep(0.5)
+                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
+                    else:
+                        if qs["wrong_words"]:
+                            qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("🚨 틀린 문제 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
+                        else: qs["phase"] = "end"; st.rerun()
