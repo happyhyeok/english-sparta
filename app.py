@@ -110,22 +110,46 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심] 자동 모델 찾기 함수
+# [중요 변경] 힌트 생성 프롬프트 대폭 강화 (영어 어순 강제)
 def generate_curriculum(level):
     model_candidates = [
-        "gemini-1.5-flash",       # 표준
-        "gemini-1.5-flash-002",   # 최신 안정
-        "gemini-1.5-flash-001",   # 구버전
-        "gemini-flash-latest",    # 별칭
-        "gemini-pro"              # 1.0 Pro
+        "gemini-1.5-flash", "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-flash-latest", "gemini-pro"
     ]
     
     headers = {'Content-Type': 'application/json'}
     
+    # 힌트 생성 규칙을 구체적으로 명시
     prompt_text = f"""
-    Create a JSON curriculum for Korean middle schooler level '{level}'.
-    Topic in English. Grammar explanations MUST be in Korean (Detailed, Why & How).
-    Output JSON Schema: {{ "topic": "...", "grammar": {{ "title": "...", "description": "...", "rule": "...", "example": "..." }}, "words": [{{ "en": "...", "ko": "..." }}], "practice_sentences": [{{ "ko": "...", "en": "...", "hint_structure": "...", "hint_grammar": "..." }}] }}
+    You are an expert English Curriculum Designer for Korean Middle School students.
+    Create a JSON curriculum for level '{level}'.
+    
+    **CRITICAL RULES for 'practice_sentences':**
+    1. **hint_structure**: MUST show the **ENGLISH Word Order** (Subject + Verb + Object/Modifer).
+       - ❌ BAD: "주어(My brother) + 부사(late) + 동사(sleeps)" (Korean Order)
+       - ✅ GOOD: "주어(My brother) + 동사(sleeps) + 부사(late)" (English Order)
+       - Use Korean terms for parts of speech: 주어, 동사, 목적어, 보어, 형용사, 부사, 전치사구.
+    2. **hint_grammar**: Explain the specific grammatical rule used in this sentence in Korean.
+       - Example: "3인칭 단수 주어이므로 동사에 's'를 붙입니다."
+    
+    Output JSON Schema:
+    {{
+        "topic": "English Topic Name",
+        "grammar": {{
+            "title": "문법 제목 (한국어)",
+            "description": "문법 상세 설명 (한국어). Why & How 포함.",
+            "rule": "Rule (English)",
+            "example": "Example (English)"
+        }},
+        "words": [{{ "en": "English Word", "ko": "한국어 뜻" }}],
+        "practice_sentences": [
+            {{ 
+                "ko": "한글 문장", 
+                "en": "English Sentence", 
+                "hint_structure": "주어(...) + 동사(...) + ... (English Order)", 
+                "hint_grammar": "문법 포인트 (한국어)" 
+            }}
+        ]
+    }}
     Create exactly 20 words and 20 sentences.
     """
     
@@ -156,7 +180,7 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-# [중요 변경] 교수법이 적용된 강력한 피드백 프롬프트
+# [유지] 강화된 피드백 프롬프트
 def evaluate_practice(target, user_input):
     prompt = f"""
     You are an expert English teacher for Korean middle school students.
@@ -165,34 +189,27 @@ def evaluate_practice(target, user_input):
     Target Sentence: "{target}"
     Student Input: "{user_input}"
 
-    **Analysis Guidelines (SLA-based):**
-    1. **Strict Language Policy:** ALL output (explanation, feedback) MUST be in **Korean** (한국어). Never use English for explanations.
-    2. **Hallucination Check:** Before giving feedback, strictly compare word-by-word. Do not claim a word is missing if it is present.
-    3. **Error Prioritization:**
-       - **Meaning/Vocab:** If the wrong word is used, correct it first.
-       - **Grammar (Syntax):** Check Word Order > Prepositions > Articles > Tense > Subject-Verb Agreement.
-       - **Spelling:** Minor typos are acceptable if meaning is clear -> Output 'PASS' but mention the typo gently.
+    **Analysis Guidelines:**
+    1. **Strict Language Policy:** ALL output MUST be in **Korean**.
+    2. **Hallucination Check:** Do not claim a word is missing if it is present.
+    3. **Error Prioritization:** Wrong Word > Word Order > Prepositions > Articles > Tense.
+    4. **Spelling:** Minor typos -> PASS but mention it.
 
-    **Output Rules:**
-    - If the sentence is correct (or close enough): Output just 'PASS'.
-    - If incorrect: Output 'FAIL' followed by a detailed explanation in Korean.
+    Output Rules:
+    - If correct: Output 'PASS'.
+    - If incorrect: Output 'FAIL' followed by detailed explanation.
     
-    **Feedback Structure (for FAIL):**
-    - 🚨 **오류 지적:** (Example: "전치사 'in'이 빠졌어요.")
-    - 💡 **이유 설명:** Explain the grammar rule simply. (Example: "장소를 나타낼 때는 앞에 'in'을 써야 해요.")
-    - ✨ **정답 유도:** Encourage them to try again.
-
-    OUTPUT FORMAT:
+    Format:
     PASS
     or
-    FAIL [Your Korean Feedback Here]
+    FAIL [Korean Feedback]
     """
     
     try:
         res = client.chat.completions.create(
             model="gpt-4o-mini", 
             messages=[{"role":"system", "content":prompt}],
-            temperature=0.3 # 창의성 낮춤 -> 정확도 향상
+            temperature=0.3
         )
         return res.choices[0].message.content
     except Exception as e:
@@ -290,7 +307,9 @@ with tab3:
         is_solved = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
         
         with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_solved):
-            st.caption(f"힌트: {q.get('hint_structure','')} | {q.get('hint_grammar','')}")
+            # [수정] 힌트 표시 부분: 구조 힌트가 영어 어순으로 나오도록 개선
+            st.caption(f"💡 구조: {q.get('hint_structure','')} | 🔑 문법: {q.get('hint_grammar','')}")
+            
             cached_res = st.session_state.practice_results.get(result_key)
             if cached_res and cached_res['status'] == 'PASS':
                 st.success(f"✅ 정답! : {cached_res['input']}")
