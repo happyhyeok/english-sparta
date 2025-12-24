@@ -115,49 +115,38 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [중요 변경 1] 캐싱 적용 (@st.cache_data) - API 호출 낭비 방지
-@st.cache_data(show_spinner=False, ttl=3600) # 1시간 동안 저장
-def generate_curriculum(level, _today_str): # _today_str은 매일 새로운 미션을 위해 넣은 더미 인자
-    model_candidates = ["gemini-1.5-flash", "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-flash-latest", "gemini-pro"]
-    headers = {'Content-Type': 'application/json'}
+# [핵심 변경] 모델 후보군을 '실제 사용 가능한 목록'으로 최적화
+@st.cache_data(show_spinner=False, ttl=3600)
+def generate_curriculum(level, _today_str):
+    # 진단 도구에서 확인된 모델들로 우선순위 변경
+    model_candidates = [
+        "gemini-flash-latest",    # 1순위: 선생님 키에 확실히 있는 모델
+        "gemini-pro-latest",      # 2순위: 대안
+        "gemini-2.0-flash-exp"    # 3순위: 실험용 (쿼터 걸릴 수 있음)
+    ]
     
+    headers = {'Content-Type': 'application/json'}
     prompt_text = f"""
     You are an expert English Curriculum Designer for Korean Middle School students.
     Create a JSON curriculum for level '{level}'.
     
-    **CRITICAL RULES for 'practice_sentences':**
-    1. **hint_structure**: MUST show the **ENGLISH Word Order** (Subject + Verb + Object/Modifer).
-       - ❌ BAD: "주어(My brother) + 부사(late) + 동사(sleeps)" (Korean Order)
-       - ✅ GOOD: "주어(My brother) + 동사(sleeps) + 부사(late)" (English Order)
-       - Use Korean terms for parts of speech: 주어, 동사, 목적어, 보어, 형용사, 부사, 전치사구.
-    2. **hint_grammar**: Explain the specific grammatical rule used in this sentence in Korean.
+    Rules for 'practice_sentences':
+    1. hint_structure: Show ENGLISH Word Order (e.g., Subject + Verb + Object).
+    2. hint_grammar: Explain rules in Korean.
     
     Output JSON Schema:
     {{
         "topic": "English Topic Name",
-        "grammar": {{
-            "title": "문법 제목 (한국어)",
-            "description": "문법 상세 설명 (한국어). Why & How 포함.",
-            "rule": "Rule (English)",
-            "example": "Example (English)"
-        }},
-        "words": [{{ "en": "English Word", "ko": "한국어 뜻" }}],
-        "practice_sentences": [
-            {{ 
-                "ko": "한글 문장", 
-                "en": "English Sentence", 
-                "hint_structure": "주어(...) + 동사(...) + ... (English Order)", 
-                "hint_grammar": "문법 포인트 (한국어)" 
-            }}
-        ]
+        "grammar": {{ "title": "...", "description": "...", "rule": "...", "example": "..." }},
+        "words": [{{ "en": "...", "ko": "..." }}],
+        "practice_sentences": [{{ "ko": "...", "en": "...", "hint_structure": "...", "hint_grammar": "..." }}]
     }}
     Create exactly 20 words and 20 sentences.
     """
-    
     payload = { "contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"response_mime_type": "application/json"} }
     
-    last_error_msg = ""
-    
+    last_error_details = []
+
     for model_name in model_candidates:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
         try:
@@ -167,15 +156,16 @@ def generate_curriculum(level, _today_str): # _today_str은 매일 새로운 미
                 text_content = result['candidates'][0]['content']['parts'][0]['text']
                 return json.loads(text_content)
             else:
-                # [중요 변경 2] 에러 내용 기록
-                last_error_msg = f"Model {model_name} Error: {response.status_code} - {response.text}"
-                continue 
-        except Exception as e: 
-            last_error_msg = str(e)
+                # 에러 수집
+                err_msg = f"⚠️ {model_name} 실패 ({response.status_code}): {response.text[:200]}"
+                last_error_details.append(err_msg)
+                continue
+        except Exception as e:
+            last_error_details.append(f"⚠️ {model_name} 접속 오류: {str(e)}")
             continue
     
-    # 실패 시 None 대신 에러 메시지 반환 (디버깅용)
-    return {"error": last_error_msg} 
+    # 모든 모델 실패 시 상세 에러 반환
+    return {"error": "\n".join(last_error_details)}
 
 def transcribe_audio(audio_bytes):
     import io
@@ -187,24 +177,10 @@ def evaluate_practice(target, user_input):
     prompt = f"""
     You are an expert English teacher for Korean middle school students.
     Task: Analyze student input vs target sentence. Provide specific feedback in **KOREAN**.
-
     Target: "{target}"
     Student Input: "{user_input}"
-
-    Guidelines:
-    1. Language: ALL output in Korean.
-    2. Hallucination: Do NOT claim a word is missing if present.
-    3. Priorities: Wrong Word > Word Order > Prepositions > Articles > Tense.
-    4. Spelling: Minor typos -> PASS.
-
-    Output Rules:
-    - Correct: Output 'PASS'.
-    - Incorrect: Output 'FAIL' followed by detailed explanation.
-    
-    Format:
-    PASS
-    or
-    FAIL [Korean Feedback]
+    Guidelines: ALL output in Korean. Wrong Word > Word Order > Prepositions > Articles > Tense.
+    Output: 'PASS' or 'FAIL [Korean Feedback]'
     """
     try:
         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.3)
@@ -257,16 +233,16 @@ if current_level is None or (total_complete - last_test_cnt) >= 5:
     st.stop()
 
 if not st.session_state.mission:
-    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (Gemini)", expanded=True) as status:
-        # 날짜를 넣어 매일 변경되도록 하되, 같은 날엔 캐싱 사용
+    with st.status("🚀 오늘의 미션을 생성하고 있습니다...", expanded=True) as status:
         today_key = date.today().isoformat()
         mission_data = generate_curriculum(current_level, today_key)
         
-        # 에러 체크
         if mission_data and "error" in mission_data:
-            st.error("🚨 연결 실패! 아래 원인을 확인하세요.")
-            st.code(mission_data["error"]) # 화면에 상세 에러 출력
-            status.update(label="오류 발생", state="error")
+            status.update(label="연결 실패", state="error")
+            st.error("🚨 AI 모델 연결에 실패했습니다.")
+            # 에러 원인을 화면에 자세히 출력 (429인지 404인지 확인용)
+            st.code(mission_data["error"])
+            st.warning("💡 429 Error가 보이면 사용량이 초과된 것입니다. 1시간 뒤에 다시 시도하거나, 새로운 구글 계정으로 API 키를 받아주세요.")
             st.stop()
         elif mission_data:
             st.session_state.mission = mission_data
@@ -308,52 +284,37 @@ with tab2:
 with tab3:
     st.markdown("### ✍️ 문장 만들기 연습")
     st.caption("힌트를 보고 문장을 완성하세요. 틀리면 내용을 수정해서 다시 제출하면 됩니다.")
-    
     for idx, q in enumerate(mission['practice_sentences']):
         result_key = f"res_{idx}"
         input_key = f"input_{idx}"
-        
         is_pass = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
         
         with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_pass):
             st.caption(f"💡 구조: {q.get('hint_structure','')} | 🔑 문법: {q.get('hint_grammar','')}")
-            
             mic_col, _ = st.columns([1, 5])
             with mic_col:
                 audio_val = audio_recorder(text="", key=f"mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
-            
             if audio_val:
-                transcribed_text = transcribe_audio(audio_val)
-                st.session_state[input_key] = transcribed_text
+                st.session_state[input_key] = transcribe_audio(audio_val)
                 st.rerun()
 
             with st.form(key=f"form_p_{idx}"):
                 user_val = st.text_input("영어 문장 입력", key=input_key)
-                submit_btn = st.form_submit_button("제출 및 채점")
-                
-                if submit_btn:
-                    if not user_val.strip():
-                        st.warning("내용을 입력해주세요.")
+                if st.form_submit_button("제출 및 채점"):
+                    if not user_val.strip(): st.warning("내용을 입력해주세요.")
                     else:
                         if user_val.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
                             st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
                         else:
-                            with st.spinner("AI 선생님이 채점 중입니다..."):
+                            with st.spinner("채점 중..."):
                                 feedback_res = evaluate_practice(q['en'], user_val)
-                            
-                            if "PASS" in feedback_res:
-                                st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
-                            else:
-                                clean_feedback = feedback_res.replace("FAIL", "").strip()
-                                st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': clean_feedback}
+                            if "PASS" in feedback_res: st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
+                            else: st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': feedback_res.replace("FAIL", "").strip()}
             
             if result_key in st.session_state.practice_results:
-                res_data = st.session_state.practice_results[result_key]
-                if res_data['status'] == 'PASS':
-                    st.success(f"🎉 정답입니다! : {res_data['input']}")
-                else:
-                    st.error(f"❌ 다시 시도해보세요!")
-                    st.info(f"💡 피드백: {res_data['feedback']}")
+                res = st.session_state.practice_results[result_key]
+                if res['status'] == 'PASS': st.success(f"🎉 정답입니다! : {res['input']}")
+                else: st.error("❌ 다시 시도해보세요!"); st.info(f"💡 피드백: {res['feedback']}")
 
 with tab4:
     qs = st.session_state.quiz_state
@@ -376,28 +337,22 @@ with tab4:
         curr = qs["current_idx"]
         target = words[curr]
         st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
-        
         if qs["phase"] == "mc":
             st.subheader(f"객관식: {target['en']}")
             if qs["current_options"] is None:
                 opts = [target['ko']]
                 while len(opts) < 4:
-                    r = random.choice(mission['words'])['ko']
+                    r = random.choice(mission['words'])['ko']; 
                     if r not in opts: opts.append(r)
-                random.shuffle(opts)
-                qs["current_options"] = opts
+                random.shuffle(opts); qs["current_options"] = opts
             with st.form(f"quiz_mc_{curr}"):
                 choice = st.radio("알맞은 뜻을 고르세요", qs["current_options"])
                 if st.form_submit_button("확인"):
                     if choice == target['ko']: st.success("정답! ⭕")
-                    else:
-                        st.error(f"오답! 정답은 '{target['ko']}' 입니다.")
-                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
-                    time.sleep(0.5)
-                    qs["current_options"] = None
+                    else: st.error(f"오답! 정답은 '{target['ko']}' 입니다."); save_wrong_word_db(user_id, target)
+                    time.sleep(0.5); qs["current_options"] = None
                     if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
                     else: qs["phase"] = "writing"; qs["current_idx"] = 0; random.shuffle(qs["shuffled_words"]); st.rerun()
-
         elif qs["phase"] == "writing":
             st.subheader(f"주관식: {target['ko']}")
             set_focus_js()
@@ -405,12 +360,9 @@ with tab4:
                 inp = st.text_input("영어 단어를 입력하세요")
                 if st.form_submit_button("제출"):
                     if inp.strip().lower() == target['en'].lower(): st.success("정답! ⭕")
-                    else:
-                        st.error(f"오답! 정답은 '{target['en']}' 입니다.")
-                        if target not in qs["wrong_words"]: qs["wrong_words"].append(target); save_wrong_word_db(user_id, target)
+                    else: st.error(f"오답! 정답은 '{target['en']}' 입니다."); save_wrong_word_db(user_id, target)
                     time.sleep(0.5)
                     if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
                     else:
-                        if qs["wrong_words"]:
-                            qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("🚨 틀린 문제 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
+                        if qs["wrong_words"]: qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("🚨 틀린 문제 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
                         else: qs["phase"] = "end"; st.rerun()
