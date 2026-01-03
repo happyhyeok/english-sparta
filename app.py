@@ -27,6 +27,10 @@ st.markdown("""
         padding: 20px;
         border-radius: 10px;
     }
+    /* 모바일 대시보드 스타일 */
+    div[data-testid="stMetricValue"] {
+        font-size: 1.2rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -115,28 +119,33 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심 변경] 모델 후보군을 '실제 사용 가능한 목록'으로 최적화
+# [핵심 변경 1] 난이도 상향 및 중복 방지 프롬프트 강화
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_curriculum(level, _today_str):
-    # 진단 도구에서 확인된 모델들로 우선순위 변경
-    model_candidates = [
-        "gemini-flash-latest",    # 1순위: 선생님 키에 확실히 있는 모델
-        "gemini-pro-latest",      # 2순위: 대안
-        "gemini-2.0-flash-exp"    # 3순위: 실험용 (쿼터 걸릴 수 있음)
-    ]
-    
+    model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
     headers = {'Content-Type': 'application/json'}
+    
+    # 요일별로 주제를 다르게 유도하여 중복 최소화 (월:과학, 화:역사, 수:문학...)
+    topics_by_day = ["Science & Technology", "History & Culture", "Literature & Arts", "Environment & Nature", "Society & Economy", "Sports & Health", "Travel & Adventure"]
+    today_topic_hint = topics_by_day[datetime.datetime.now().weekday()]
+
     prompt_text = f"""
-    You are an expert English Curriculum Designer for Korean Middle School students.
+    You are an expert English Curriculum Designer for 'Advanced Middle School to High School Prep' students (CEFR B1/B2 Level).
     Create a JSON curriculum for level '{level}'.
     
-    Rules for 'practice_sentences':
+    **CONTENT REQUIREMENTS:**
+    1. **Difficulty:** Use **advanced academic vocabulary** suitable for ambitious middle schoolers. Avoid elementary words like 'apple', 'book', 'school'.
+    2. **Vocabulary:** Select 20 words that are **essential for high school entrance exams**.
+    3. **Novelty:** Ensure at least 5 words are **rare or challenging** academic words.
+    4. **Topic:** Focus on **'{today_topic_hint}'** to ensure variety from yesterday.
+    
+    **Rules for 'practice_sentences':**
     1. hint_structure: Show ENGLISH Word Order (e.g., Subject + Verb + Object).
     2. hint_grammar: Explain rules in Korean.
     
     Output JSON Schema:
     {{
-        "topic": "English Topic Name",
+        "topic": "English Topic Name (related to {today_topic_hint})",
         "grammar": {{ "title": "...", "description": "...", "rule": "...", "example": "..." }},
         "words": [{{ "en": "...", "ko": "..." }}],
         "practice_sentences": [{{ "ko": "...", "en": "...", "hint_structure": "...", "hint_grammar": "..." }}]
@@ -156,7 +165,6 @@ def generate_curriculum(level, _today_str):
                 text_content = result['candidates'][0]['content']['parts'][0]['text']
                 return json.loads(text_content)
             else:
-                # 에러 수집
                 err_msg = f"⚠️ {model_name} 실패 ({response.status_code}): {response.text[:200]}"
                 last_error_details.append(err_msg)
                 continue
@@ -164,7 +172,6 @@ def generate_curriculum(level, _today_str):
             last_error_details.append(f"⚠️ {model_name} 접속 오류: {str(e)}")
             continue
     
-    # 모든 모델 실패 시 상세 에러 반환
     return {"error": "\n".join(last_error_details)}
 
 def transcribe_audio(audio_bytes):
@@ -190,33 +197,52 @@ def evaluate_practice(target, user_input):
 # ==========================================
 # 3. 메인 화면
 # ==========================================
-st.title("🏫 AI 중학 영어 스파르타")
+# [핵심 변경 2] UI 수정: 상단 대시보드 배치
 
-# 진단 도구 (유지)
-with st.expander("🛠️ API 연결 문제 해결 도구", expanded=False):
-    if st.button("내 API 키로 가능한 모델 확인하기"):
-        try:
-            test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
-            res = requests.get(test_url).json()
-            models = [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
-            st.success(f"사용 가능 모델: {', '.join(models)}")
-        except Exception as e:
-            st.error(f"확인 실패: {e}")
-
+# 사이드바는 로그인 및 진단용으로 축소
 with st.sidebar:
-    st.header("🔑 로그인")
+    st.header("⚙️ 설정")
+    # API 진단 도구
+    with st.expander("🛠️ 연결 상태 확인", expanded=False):
+        if st.button("모델 확인"):
+            try:
+                test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
+                res = requests.get(test_url).json()
+                models = [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+                st.success(f"성공: {len(models)}개 모델 발견")
+            except Exception as e: st.error(f"실패: {e}")
+    
+    st.divider()
+    st.caption("로그인 정보")
     user_id = st.text_input("아이디", value="student1")
-    if user_id:
-        streak = update_attendance(user_id)
-        user_data = get_user_data(user_id)
-        st.success(f"🔥 {streak}일 연속 학습 중!")
-        st.info(f"🏆 누적 완료: {user_data.get('total_complete_count', 0)}회")
-    else: st.stop()
 
+# 로그인 체크 및 데이터 로드
+if not user_id:
+    st.warning("좌측 사이드바에서 아이디를 입력해주세요.")
+    st.stop()
+
+# 데이터 업데이트
+streak = update_attendance(user_id)
+user_data = get_user_data(user_id)
 current_level = user_data.get('current_level')
 total_complete = user_data.get('total_complete_count', 0)
 last_test_cnt = user_data.get('last_test_count', 0)
 
+# [UI 변경] 메인 화면 상단에 상태 표시 (모바일 최적화)
+st.title("🏫 AI 중학 영어 스파르타")
+
+# 컬럼 3개로 나누어 대시보드처럼 표시
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric(label="👤 학생", value=user_id)
+with col2:
+    st.metric(label="🔥 연속 학습", value=f"{streak}일")
+with col3:
+    st.metric(label="🏆 누적 완료", value=f"{total_complete}회")
+
+st.divider()
+
+# 레벨 테스트 로직
 if current_level is None or (total_complete - last_test_cnt) >= 5:
     st.subheader("📝 레벨 테스트")
     st.write("Q. What do you usually do on weekends?")
@@ -233,16 +259,15 @@ if current_level is None or (total_complete - last_test_cnt) >= 5:
     st.stop()
 
 if not st.session_state.mission:
-    with st.status("🚀 오늘의 미션을 생성하고 있습니다...", expanded=True) as status:
+    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (난이도 UP!)", expanded=True) as status:
         today_key = date.today().isoformat()
         mission_data = generate_curriculum(current_level, today_key)
         
         if mission_data and "error" in mission_data:
             status.update(label="연결 실패", state="error")
             st.error("🚨 AI 모델 연결에 실패했습니다.")
-            # 에러 원인을 화면에 자세히 출력 (429인지 404인지 확인용)
             st.code(mission_data["error"])
-            st.warning("💡 429 Error가 보이면 사용량이 초과된 것입니다. 1시간 뒤에 다시 시도하거나, 새로운 구글 계정으로 API 키를 받아주세요.")
+            st.warning("💡 429 Error가 보이면 사용량이 초과된 것입니다.")
             st.stop()
         elif mission_data:
             st.session_state.mission = mission_data
@@ -252,8 +277,7 @@ if not st.session_state.mission:
             st.stop()
 
 mission = st.session_state.mission
-st.header(f"Topic: {mission['topic']}")
-st.caption(f"Level: {current_level}")
+st.subheader(f"Topic: {mission['topic']}")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📘 오늘의 문법", "🍎 오늘의 단어", "✍️ 문장 연습", "⚔️ 실전 테스트"])
 
