@@ -119,25 +119,40 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심 변경 1] 난이도 상향 및 중복 방지 프롬프트 강화
+# [수정] 난이도 조절: 너무 쉽지도, 너무 어렵지도 않은 '중학 표준' 난이도
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_curriculum(level, _today_str):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
     headers = {'Content-Type': 'application/json'}
     
-    # 요일별로 주제를 다르게 유도하여 중복 최소화 (월:과학, 화:역사, 수:문학...)
-    topics_by_day = ["Science & Technology", "History & Culture", "Literature & Arts", "Environment & Nature", "Society & Economy", "Sports & Health", "Travel & Adventure"]
+    # 주제를 좀 더 중학생의 일상과 밀접하게 변경 (너무 학술적인 주제 제외)
+    topics_by_day = [
+        "School Life & Friends",       # 월: 학교와 친구
+        "Hobbies & Free Time",         # 화: 취미
+        "Animals & Nature",            # 수: 동물과 자연 (Environment 대신 Nature)
+        "Shopping & Food",             # 목: 쇼핑과 음식 (Economy 대신 Shopping)
+        "Travel & Culture",            # 금: 여행
+        "Health & Feelings",           # 토: 건강과 감정 (Rehabilitation 같은 단어 방지)
+        "Future Jobs & Dreams"         # 일: 장래희망
+    ]
     today_topic_hint = topics_by_day[datetime.datetime.now().weekday()]
 
     prompt_text = f"""
-    You are an expert English Curriculum Designer for 'Advanced Middle School to High School Prep' students (CEFR B1/B2 Level).
+    You are an expert English Curriculum Designer for Korean Middle School students (Grades 1-3).
     Create a JSON curriculum for level '{level}'.
     
-    **CONTENT REQUIREMENTS:**
-    1. **Difficulty:** Use **advanced academic vocabulary** suitable for ambitious middle schoolers. Avoid elementary words like 'apple', 'book', 'school'.
-    2. **Vocabulary:** Select 20 words that are **essential for high school entrance exams**.
-    3. **Novelty:** Ensure at least 5 words are **rare or challenging** academic words.
-    4. **Topic:** Focus on **'{today_topic_hint}'** to ensure variety from yesterday.
+    **CONTENT GUIDELINES (The "Goldilocks" Zone):**
+    1. **Target Level:** CEFR A2 to B1 (Standard Korean Middle School Curriculum).
+       - ❌ Avoid elementary words: apple, cat, book, pen.
+       - ❌ Avoid academic/medical words: rehabilitation, concussion, philosophy.
+       - ✅ **Use Standard Words:** adventure, celebrate, nervous, delicious, invite, museum, project.
+    
+    2. **Vocabulary Mix (20 words):**
+       - **Easy (30%):** Basic verbs/adjectives for confidence (e.g., enjoy, busy, famous).
+       - **Medium (50%):** Core middle school vocabulary (e.g., protect, tradition, opinion).
+       - **Challenge (20%):** Slightly advanced words, but common (e.g., confident, necessary).
+    
+    3. **Topic:** Focus on **'{today_topic_hint}'**.
     
     **Rules for 'practice_sentences':**
     1. hint_structure: Show ENGLISH Word Order (e.g., Subject + Verb + Object).
