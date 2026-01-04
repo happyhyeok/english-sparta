@@ -118,68 +118,45 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [핵심 변경] 사용자의 '진도(누적 완료 수)'에 맞춰 중1 문법을 순서대로 배정
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_curriculum(level, _today_str, user_progress_count):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
     headers = {'Content-Type': 'application/json'}
     
-    # [1] 중1 표준 문법 실라버스 (20단계 반복)
+    # 중1 표준 문법 실라버스
     grammar_syllabus = [
-        "Be동사의 현재형 (am, are, is)",
-        "일반동사의 현재형 (3인칭 단수 s/es)",
-        "명사와 관사 (a/an, the, 복수형 s)",
-        "대명사 (주격, 소유격, 목적격)",
-        "형용사와 부사의 역할",
-        "Be동사의 부정문과 의문문",
-        "일반동사의 부정문과 의문문 (do/does)",
-        "진행형 시제 (be + v-ing)",
-        "미래 시제 (will, be going to)",
-        "조동사 1 (can, may)",
-        "조동사 2 (must, should, have to)",
-        "의문사 의문문 (Who, What, Where, When, Why, How)",
-        "과거 시제 (Be동사 was/were)",
-        "과거 시제 (일반동사 규칙 변화 -ed)",
-        "과거 시제 (일반동사 불규칙 변화)",
-        "To 부정사의 명사적 용법",
-        "동명사 (v-ing)",
-        "명령문과 제안문 (Let's)",
-        "전치사 (시간: at, on, in)",
-        "전치사 (장소: at, on, in, under...)"
+        "Be동사의 현재형 (am, are, is)", "일반동사의 현재형 (3인칭 단수 s/es)", "명사와 관사 (a/an, the, 복수형 s)",
+        "대명사 (주격, 소유격, 목적격)", "형용사와 부사의 역할", "Be동사의 부정문과 의문문",
+        "일반동사의 부정문과 의문문 (do/does)", "진행형 시제 (be + v-ing)", "미래 시제 (will, be going to)",
+        "조동사 1 (can, may)", "조동사 2 (must, should, have to)", "의문사 의문문 (Who, What, Where...)",
+        "과거 시제 (Be동사 was/were)", "과거 시제 (일반동사 규칙 -ed)", "과거 시제 (일반동사 불규칙)",
+        "To 부정사의 명사적 용법", "동명사 (v-ing)", "명령문과 제안문 (Let's)", "전치사 (시간: at, on, in)", "전치사 (장소: at, on, in)"
     ]
     
-    # 사용자의 누적 완료 횟수에 따라 오늘의 문법 결정
     today_grammar = grammar_syllabus[user_progress_count % len(grammar_syllabus)]
     
-    # [2] 요일별 주제 (중복 방지)
     topics_by_day = ["School Life", "Hobbies", "Nature & Animals", "Food & Cooking", "Travel", "Health & Feelings", "My Dream Job"]
     today_topic_hint = topics_by_day[datetime.datetime.now().weekday()]
 
     prompt_text = f"""
-    You are an expert English Curriculum Designer.
-    Create a curriculum for Korean Middle School Student (Level: {level}).
+    You are an expert English Curriculum Designer for Korean Middle School Grade 1.
     
     **CRITICAL INSTRUCTION - GRAMMAR:**
-    Today's Fixed Grammar Topic is: **"{today_grammar}"**.
-    The 'grammar' section and ALL 'practice_sentences' MUST be based on this specific grammar rule.
-    Do NOT create complex sentences. Keep the sentence structure simple (Subject + Verb + Object) suitable for Grade 1.
-    
-    **CONTENT GUIDELINES (Vocabulary):**
-    1. **Target:** CEFR A2-B1 (Middle School).
-    2. **Mix:** 30% Easy, 50% Medium (Core), 20% Challenge (e.g., confident, necessary).
-    3. **Topic:** {today_topic_hint}.
+    Today's Fixed Grammar Topic: **"{today_grammar}"**.
+    ALL 'practice_sentences' MUST use this rule.
+    **Keep sentences SIMPLE and SHORT (Max 10 words).** Avoid complex structures like relative clauses or participle phrases unless it is the target grammar.
     
     Output JSON Schema:
     {{
-        "topic": "Topic Name",
-        "grammar": {{ "title": "{today_grammar}", "description": "Explain {today_grammar} in Korean (Easy & Detailed).", "rule": "English Rule", "example": "English Example" }},
+        "topic": "Topic Name ({today_topic_hint})",
+        "grammar": {{ "title": "{today_grammar}", "description": "Easy Korean Explanation", "rule": "English Rule", "example": "English Example" }},
         "words": [{{ "en": "...", "ko": "..." }}],
         "practice_sentences": [
             {{ 
-                "ko": "Korean Sentence", 
-                "en": "English Sentence (Must use {today_grammar})", 
-                "hint_structure": "English Word Order", 
-                "hint_grammar": "Explain usage of {today_grammar} in Korean" 
+                "ko": "Korean", 
+                "en": "English (Simple, uses {today_grammar})", 
+                "hint_structure": "Subject + Verb + Object", 
+                "hint_grammar": "Korean Tip" 
             }}
         ]
     }}
@@ -211,14 +188,34 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
+# [핵심 변경] 채점 로직 강화: 정답 문장 구조를 기준으로 피드백 생성
 def evaluate_practice(target, user_input):
     prompt = f"""
-    Role: English Teacher. Target: "{target}". Input: "{user_input}".
-    Rule: Analyze in Korean. Wrong Word > Word Order > Grammar.
-    Output: 'PASS' or 'FAIL [Korean Feedback]'
+    Role: Precise English Grammar Teacher for Korean Middle Schoolers.
+    Task: Compare the Student Input against the Target Sentence to find errors.
+    
+    Target Sentence: "{target}"
+    Student Input: "{user_input}"
+    
+    **Analysis Steps (Thinking Process):**
+    1. Identify the Main Verb and Sentence Structure of the **TARGET** sentence first.
+    2. Check if the Student used the correct Subject and Verb.
+    3. Check the Object/Complement order based on the TARGET.
+    4. **CRITICAL:** Explain errors based on the TARGET's correct structure. Do not invent new rules.
+       - If user put 'have a career' at the end, but Target has it in the middle, say: "In the correct sentence, 'have a career' comes after 'going to' because..."
+    
+    **Output Guidelines:**
+    - Language: Korean ONLY.
+    - If meaning is correct (minor typo ok): Output 'PASS'.
+    - If incorrect: Output 'FAIL' followed by specific feedback.
+    
+    Output Format:
+    PASS
+    or
+    FAIL [피드백 내용]
     """
     try:
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.3)
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.2)
         return res.choices[0].message.content
     except Exception as e: return f"FAIL 오류: {str(e)}"
 
@@ -265,7 +262,6 @@ if current_level is None:
 if not st.session_state.mission:
     with st.status("🚀 오늘의 미션을 생성하고 있습니다... (중1 문법 커리큘럼 적용)", expanded=True) as status:
         today_key = date.today().isoformat()
-        # [중요] generate_curriculum에 total_complete(진도) 정보 전달
         mission_data = generate_curriculum(current_level, today_key, total_complete)
         
         if mission_data and "error" in mission_data:
