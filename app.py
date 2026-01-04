@@ -134,7 +134,6 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [수정됨] 문제 출제 로직: "형용사 금지" 및 "1:1 매칭" 강력 규제
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_curriculum(level, _today_str, user_progress_count):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
@@ -212,29 +211,33 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-# [수정됨] 채점 로직: 정답에 없는 형용사 강요 금지
+# [수정됨] 채점 로직: 영어 절대 금지 & 한국어 피드백 강제
 def evaluate_practice(target, user_input):
     prompt = f"""
-    Role: Fair English Grammar Grader for Korean students.
-    Task: Check if the Student Input matches the Target Sentence structure and meaning.
+    Role: Kind English Teacher for Korean Middle School Students.
+    Task: Check the student's input against the Target Sentence.
     
     Target: "{target}"
     Input: "{user_input}"
     
-    **Evaluation Rules:**
-    1. **NO HALLUCINATION:** Do NOT penalize the student for missing words (like adjectives 'big', 'new', 'fast') that are NOT present in the 'Target' sentence.
-       - If Target is "Dad drives a truck" and Input is "Dad drives a truck", it is PASS.
-       - If Input is "Dad drives truck", output FAIL and explain "Missing article 'a'".
-    2. **Strict Grammar:** Check Subject-Verb Agreement, Articles (a/an/the), and Word Order.
-    3. **Feedback:** Provide explanation in Korean. Focus ONLY on the grammar rule.
+    **STRICT RULES:**
+    1. **NO HALLUCINATION:** Do NOT penalize missing adjectives (big, new) unless they are in the Target.
+    2. **LANGUAGE: KOREAN ONLY (한국어)**. 
+       - ❌ BAD: "Missing preposition 'for'."
+       - ✅ GOOD: "전치사 'for'가 빠졌어요."
+       - ✅ GOOD: "주어와 동사의 수 일치가 틀렸습니다."
+    3. **Evaluation:**
+       - If strict match (punctuation ignored): Output 'PASS'.
+       - If mismatch: Output 'FAIL' followed by a friendly KOREAN explanation.
     
     Output Format:
     PASS
     or
-    FAIL [피드백 내용]
+    FAIL [한국어 피드백]
     """
     try:
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.1)
+        # Temperature를 0.2로 낮춰서 지시사항을 더 철저히 따르게 함
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.2)
         return res.choices[0].message.content
     except Exception as e: return f"FAIL 오류: {str(e)}"
 
@@ -310,102 +313,4 @@ with tab1:
     st.info(f"📌 공식: {gr.get('rule', '')}")
     st.markdown(f"💡 예문: *{gr['example']}*")
     st.divider()
-    if st.button("🔊 문법 설명 듣기"):
-        with st.spinner("생성 중..."):
-            tts_text = f"오늘의 문법은 {gr['title']}입니다. {gr['description']} 예를 들어 {gr['example']} 처럼 씁니다."
-            audio = get_audio_bytes(tts_text)
-            if audio: st.audio(audio, format='audio/mp3')
-
-with tab2:
-    st.info("💡 단어를 학습하세요.")
-    for i, w in enumerate(mission['words']):
-        c1, c2, c3 = st.columns([1, 4, 1])
-        with c1: st.write(f"**{i+1}.**")
-        with c2: st.write(f"**{w['en']}** : {w['ko']}")
-        with c3:
-            if st.button("🔊", key=f"tts_w_{i}"):
-                audio = get_audio_bytes(w['en'])
-                if audio: st.audio(audio, format='audio/mp3', autoplay=True)
-
-with tab3:
-    st.markdown("### ✍️ 문장 만들기 연습")
-    st.caption(f"오늘의 문법 **[{mission['grammar']['title']}]**을 활용해 영작하세요.")
-    for idx, q in enumerate(mission['practice_sentences']):
-        result_key = f"res_{idx}"; input_key = f"input_{idx}"
-        is_pass = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
-        
-        with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_pass):
-            st.caption(f"💡 구조: {q.get('hint_structure','')} | 🔑 문법: {q.get('hint_grammar','')}")
-            mic_col, _ = st.columns([1, 5])
-            with mic_col:
-                audio_val = audio_recorder(text="", key=f"mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
-            
-            if audio_val:
-                current_audio_hash = hash(audio_val)
-                prev_audio_key = f"prev_audio_{idx}"
-                if prev_audio_key not in st.session_state.last_processed_audio or st.session_state.last_processed_audio[prev_audio_key] != current_audio_hash:
-                    st.session_state[input_key] = transcribe_audio(audio_val)
-                    st.session_state.last_processed_audio[prev_audio_key] = current_audio_hash 
-                    st.rerun()
-
-            with st.form(key=f"form_p_{idx}"):
-                user_val = st.text_input("영어 문장 입력", key=input_key)
-                if st.form_submit_button("제출"):
-                    if not user_val.strip(): st.warning("입력해주세요.")
-                    else:
-                        if user_val.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
-                            st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
-                        else:
-                            with st.spinner("채점 중..."): res = evaluate_practice(q['en'], user_val)
-                            if "PASS" in res: st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
-                            else: st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': res.replace("FAIL", "").strip()}
-            
-            if result_key in st.session_state.practice_results:
-                res = st.session_state.practice_results[result_key]
-                if res['status'] == 'PASS': st.success(f"🎉 정답! : {res['input']}")
-                else: st.error("❌ 오답"); st.info(f"피드백: {res['feedback']}")
-
-with tab4:
-    qs = st.session_state.quiz_state; words = qs["shuffled_words"]
-    if not words and qs["phase"] == "ready":
-        if st.button("🚀 실전 테스트 시작"):
-            qs["shuffled_words"] = random.sample(mission['words'], 20); qs["phase"] = "mc"; st.rerun()
-    elif qs["phase"] == "end":
-        st.balloons(); st.success(f"🎉 {qs['loop_count']}회차 완료!")
-        if st.button("학습 종료"):
-            complete_daily_mission(user_id)
-            for key in ["mission", "audio_cache", "quiz_state", "practice_results", "last_processed_audio"]: 
-                if key in st.session_state: del st.session_state[key]
-            st.rerun()
-    elif words:
-        total = len(words); curr = qs["current_idx"]; target = words[curr]
-        st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
-        if qs["phase"] == "mc":
-            st.subheader(f"객관식: {target['en']}")
-            if qs["current_options"] is None:
-                opts = [target['ko']]
-                while len(opts) < 4:
-                    r = random.choice(mission['words'])['ko']
-                    if r not in opts: opts.append(r)
-                random.shuffle(opts); qs["current_options"] = opts
-            with st.form(f"quiz_mc_{curr}"):
-                choice = st.radio("뜻 선택", qs["current_options"])
-                if st.form_submit_button("확인"):
-                    if choice == target['ko']: st.success("정답! ⭕")
-                    else: st.error("오답!"); save_wrong_word_db(user_id, target)
-                    time.sleep(0.5); qs["current_options"] = None
-                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
-                    else: qs["phase"] = "writing"; qs["current_idx"] = 0; random.shuffle(qs["shuffled_words"]); st.rerun()
-        elif qs["phase"] == "writing":
-            st.subheader(f"주관식: {target['ko']}")
-            set_focus_js()
-            with st.form(f"quiz_wr_{curr}", clear_on_submit=True):
-                inp = st.text_input("영어 단어 입력")
-                if st.form_submit_button("제출"):
-                    if inp.strip().lower() == target['en'].lower(): st.success("정답! ⭕")
-                    else: st.error("오답!"); save_wrong_word_db(user_id, target)
-                    time.sleep(0.5)
-                    if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
-                    else:
-                        if qs["wrong_words"]: qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("오답 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
-                        else: qs["phase"] = "end"; st.rerun()
+    if st.button("🔊 문법
