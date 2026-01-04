@@ -313,6 +313,7 @@ with tab1:
     st.info(f"📌 공식: {gr.get('rule', '')}")
     st.markdown(f"💡 예문: *{gr['example']}*")
     st.divider()
+    # [수정됨] 문법 에러 수정: 따옴표 닫기 완료
     if st.button("🔊 문법 설명 듣기"):
         with st.spinner("생성 중..."):
             tts_text = f"오늘의 문법은 {gr['title']}입니다. {gr['description']} 예를 들어 {gr['example']} 처럼 씁니다."
