@@ -27,7 +27,6 @@ st.markdown("""
         padding: 20px;
         border-radius: 10px;
     }
-    /* 모바일 대시보드 스타일 */
     div[data-testid="stMetricValue"] {
         font-size: 1.2rem;
     }
@@ -119,72 +118,89 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
-# [수정] 난이도 조절: 너무 쉽지도, 너무 어렵지도 않은 '중학 표준' 난이도
+# [핵심 변경] 사용자의 '진도(누적 완료 수)'에 맞춰 중1 문법을 순서대로 배정
 @st.cache_data(show_spinner=False, ttl=3600)
-def generate_curriculum(level, _today_str):
+def generate_curriculum(level, _today_str, user_progress_count):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
     headers = {'Content-Type': 'application/json'}
     
-    # 주제를 좀 더 중학생의 일상과 밀접하게 변경 (너무 학술적인 주제 제외)
-    topics_by_day = [
-        "School Life & Friends",       # 월: 학교와 친구
-        "Hobbies & Free Time",         # 화: 취미
-        "Animals & Nature",            # 수: 동물과 자연 (Environment 대신 Nature)
-        "Shopping & Food",             # 목: 쇼핑과 음식 (Economy 대신 Shopping)
-        "Travel & Culture",            # 금: 여행
-        "Health & Feelings",           # 토: 건강과 감정 (Rehabilitation 같은 단어 방지)
-        "Future Jobs & Dreams"         # 일: 장래희망
+    # [1] 중1 표준 문법 실라버스 (20단계 반복)
+    grammar_syllabus = [
+        "Be동사의 현재형 (am, are, is)",
+        "일반동사의 현재형 (3인칭 단수 s/es)",
+        "명사와 관사 (a/an, the, 복수형 s)",
+        "대명사 (주격, 소유격, 목적격)",
+        "형용사와 부사의 역할",
+        "Be동사의 부정문과 의문문",
+        "일반동사의 부정문과 의문문 (do/does)",
+        "진행형 시제 (be + v-ing)",
+        "미래 시제 (will, be going to)",
+        "조동사 1 (can, may)",
+        "조동사 2 (must, should, have to)",
+        "의문사 의문문 (Who, What, Where, When, Why, How)",
+        "과거 시제 (Be동사 was/were)",
+        "과거 시제 (일반동사 규칙 변화 -ed)",
+        "과거 시제 (일반동사 불규칙 변화)",
+        "To 부정사의 명사적 용법",
+        "동명사 (v-ing)",
+        "명령문과 제안문 (Let's)",
+        "전치사 (시간: at, on, in)",
+        "전치사 (장소: at, on, in, under...)"
     ]
+    
+    # 사용자의 누적 완료 횟수에 따라 오늘의 문법 결정
+    today_grammar = grammar_syllabus[user_progress_count % len(grammar_syllabus)]
+    
+    # [2] 요일별 주제 (중복 방지)
+    topics_by_day = ["School Life", "Hobbies", "Nature & Animals", "Food & Cooking", "Travel", "Health & Feelings", "My Dream Job"]
     today_topic_hint = topics_by_day[datetime.datetime.now().weekday()]
 
     prompt_text = f"""
-    You are an expert English Curriculum Designer for Korean Middle School students (Grades 1-3).
-    Create a JSON curriculum for level '{level}'.
+    You are an expert English Curriculum Designer.
+    Create a curriculum for Korean Middle School Student (Level: {level}).
     
-    **CONTENT GUIDELINES (The "Goldilocks" Zone):**
-    1. **Target Level:** CEFR A2 to B1 (Standard Korean Middle School Curriculum).
-       - ❌ Avoid elementary words: apple, cat, book, pen.
-       - ❌ Avoid academic/medical words: rehabilitation, concussion, philosophy.
-       - ✅ **Use Standard Words:** adventure, celebrate, nervous, delicious, invite, museum, project.
+    **CRITICAL INSTRUCTION - GRAMMAR:**
+    Today's Fixed Grammar Topic is: **"{today_grammar}"**.
+    The 'grammar' section and ALL 'practice_sentences' MUST be based on this specific grammar rule.
+    Do NOT create complex sentences. Keep the sentence structure simple (Subject + Verb + Object) suitable for Grade 1.
     
-    2. **Vocabulary Mix (20 words):**
-       - **Easy (30%):** Basic verbs/adjectives for confidence (e.g., enjoy, busy, famous).
-       - **Medium (50%):** Core middle school vocabulary (e.g., protect, tradition, opinion).
-       - **Challenge (20%):** Slightly advanced words, but common (e.g., confident, necessary).
-    
-    3. **Topic:** Focus on **'{today_topic_hint}'**.
-    
-    **Rules for 'practice_sentences':**
-    1. hint_structure: Show ENGLISH Word Order (e.g., Subject + Verb + Object).
-    2. hint_grammar: Explain rules in Korean.
+    **CONTENT GUIDELINES (Vocabulary):**
+    1. **Target:** CEFR A2-B1 (Middle School).
+    2. **Mix:** 30% Easy, 50% Medium (Core), 20% Challenge (e.g., confident, necessary).
+    3. **Topic:** {today_topic_hint}.
     
     Output JSON Schema:
     {{
-        "topic": "English Topic Name (related to {today_topic_hint})",
-        "grammar": {{ "title": "...", "description": "...", "rule": "...", "example": "..." }},
+        "topic": "Topic Name",
+        "grammar": {{ "title": "{today_grammar}", "description": "Explain {today_grammar} in Korean (Easy & Detailed).", "rule": "English Rule", "example": "English Example" }},
         "words": [{{ "en": "...", "ko": "..." }}],
-        "practice_sentences": [{{ "ko": "...", "en": "...", "hint_structure": "...", "hint_grammar": "..." }}]
+        "practice_sentences": [
+            {{ 
+                "ko": "Korean Sentence", 
+                "en": "English Sentence (Must use {today_grammar})", 
+                "hint_structure": "English Word Order", 
+                "hint_grammar": "Explain usage of {today_grammar} in Korean" 
+            }}
+        ]
     }}
     Create exactly 20 words and 20 sentences.
     """
+    
     payload = { "contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"response_mime_type": "application/json"} }
     
     last_error_details = []
-
     for model_name in model_candidates:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={google_api_key}"
         try:
             response = requests.post(url, headers=headers, json=payload)
             if response.status_code == 200:
                 result = response.json()
-                text_content = result['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(text_content)
+                return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
             else:
-                err_msg = f"⚠️ {model_name} 실패 ({response.status_code}): {response.text[:200]}"
-                last_error_details.append(err_msg)
+                last_error_details.append(f"{model_name}: {response.status_code}")
                 continue
         except Exception as e:
-            last_error_details.append(f"⚠️ {model_name} 접속 오류: {str(e)}")
+            last_error_details.append(str(e))
             continue
     
     return {"error": "\n".join(last_error_details)}
@@ -197,11 +213,8 @@ def transcribe_audio(audio_bytes):
 
 def evaluate_practice(target, user_input):
     prompt = f"""
-    You are an expert English teacher for Korean middle school students.
-    Task: Analyze student input vs target sentence. Provide specific feedback in **KOREAN**.
-    Target: "{target}"
-    Student Input: "{user_input}"
-    Guidelines: ALL output in Korean. Wrong Word > Word Order > Prepositions > Articles > Tense.
+    Role: English Teacher. Target: "{target}". Input: "{user_input}".
+    Rule: Analyze in Korean. Wrong Word > Word Order > Grammar.
     Output: 'PASS' or 'FAIL [Korean Feedback]'
     """
     try:
@@ -212,84 +225,54 @@ def evaluate_practice(target, user_input):
 # ==========================================
 # 3. 메인 화면
 # ==========================================
-# [핵심 변경 2] UI 수정: 상단 대시보드 배치
-
-# 사이드바는 로그인 및 진단용으로 축소
 with st.sidebar:
     st.header("⚙️ 설정")
-    # API 진단 도구
     with st.expander("🛠️ 연결 상태 확인", expanded=False):
         if st.button("모델 확인"):
             try:
                 test_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={google_api_key}"
                 res = requests.get(test_url).json()
                 models = [m['name'] for m in res.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
-                st.success(f"성공: {len(models)}개 모델 발견")
+                st.success(f"성공: {len(models)}개")
             except Exception as e: st.error(f"실패: {e}")
-    
     st.divider()
-    st.caption("로그인 정보")
     user_id = st.text_input("아이디", value="student1")
 
-# 로그인 체크 및 데이터 로드
-if not user_id:
-    st.warning("좌측 사이드바에서 아이디를 입력해주세요.")
-    st.stop()
+if not user_id: st.warning("아이디를 입력하세요."); st.stop()
 
-# 데이터 업데이트
 streak = update_attendance(user_id)
 user_data = get_user_data(user_id)
 current_level = user_data.get('current_level')
 total_complete = user_data.get('total_complete_count', 0)
-last_test_cnt = user_data.get('last_test_count', 0)
 
-# [UI 변경] 메인 화면 상단에 상태 표시 (모바일 최적화)
 st.title("🏫 AI 중학 영어 스파르타")
-
-# 컬럼 3개로 나누어 대시보드처럼 표시
 col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric(label="👤 학생", value=user_id)
-with col2:
-    st.metric(label="🔥 연속 학습", value=f"{streak}일")
-with col3:
-    st.metric(label="🏆 누적 완료", value=f"{total_complete}회")
-
+with col1: st.metric("👤 학생", user_id)
+with col2: st.metric("🔥 연속 학습", f"{streak}일")
+with col3: st.metric("🏆 누적 완료", f"{total_complete}회")
 st.divider()
 
-# 레벨 테스트 로직
-if current_level is None or (total_complete - last_test_cnt) >= 5:
-    st.subheader("📝 레벨 테스트")
-    st.write("Q. What do you usually do on weekends?")
+if current_level is None:
+    st.subheader("📝 레벨 테스트"); st.write("Q. What do you usually do on weekends?")
     aud = audio_recorder(text="", key="lvl_rec", neutral_color="#6aa36f", recording_color="#e8b62c")
     if aud:
-        txt = transcribe_audio(aud)
-        st.write(f"답변: {txt}")
+        txt = transcribe_audio(aud); st.write(f"답변: {txt}")
         if len(txt) > 1:
-            lvl = run_level_test_ai(txt)
-            update_level_and_test_log(user_id, lvl)
-            st.success(f"레벨 설정 완료: {lvl}")
-            time.sleep(1.5)
-            st.rerun()
+            lvl = run_level_test_ai(txt); update_level_and_test_log(user_id, lvl)
+            st.success(f"완료: {lvl}"); time.sleep(1.5); st.rerun()
     st.stop()
 
 if not st.session_state.mission:
-    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (난이도 UP!)", expanded=True) as status:
+    with st.status("🚀 오늘의 미션을 생성하고 있습니다... (중1 문법 커리큘럼 적용)", expanded=True) as status:
         today_key = date.today().isoformat()
-        mission_data = generate_curriculum(current_level, today_key)
+        # [중요] generate_curriculum에 total_complete(진도) 정보 전달
+        mission_data = generate_curriculum(current_level, today_key, total_complete)
         
         if mission_data and "error" in mission_data:
-            status.update(label="연결 실패", state="error")
-            st.error("🚨 AI 모델 연결에 실패했습니다.")
-            st.code(mission_data["error"])
-            st.warning("💡 429 Error가 보이면 사용량이 초과된 것입니다.")
-            st.stop()
+            status.update(label="오류", state="error"); st.error(mission_data["error"]); st.stop()
         elif mission_data:
-            st.session_state.mission = mission_data
-            status.update(label="준비 완료!", state="complete", expanded=False)
-        else:
-            status.update(label="알 수 없는 오류", state="error")
-            st.stop()
+            st.session_state.mission = mission_data; status.update(label="완료!", state="complete", expanded=False)
+        else: status.update(label="오류", state="error"); st.stop()
 
 mission = st.session_state.mission
 st.subheader(f"Topic: {mission['topic']}")
@@ -310,7 +293,7 @@ with tab1:
             if audio: st.audio(audio, format='audio/mp3')
 
 with tab2:
-    st.info("💡 스피커를 누르면 발음을 들을 수 있어요.")
+    st.info("💡 단어를 학습하세요.")
     for i, w in enumerate(mission['words']):
         c1, c2, c3 = st.columns([1, 4, 1])
         with c1: st.write(f"**{i+1}.**")
@@ -322,10 +305,9 @@ with tab2:
 
 with tab3:
     st.markdown("### ✍️ 문장 만들기 연습")
-    st.caption("힌트를 보고 문장을 완성하세요. 틀리면 내용을 수정해서 다시 제출하면 됩니다.")
+    st.caption(f"오늘의 문법 **[{mission['grammar']['title']}]**을 활용해 영작하세요.")
     for idx, q in enumerate(mission['practice_sentences']):
-        result_key = f"res_{idx}"
-        input_key = f"input_{idx}"
+        result_key = f"res_{idx}"; input_key = f"input_{idx}"
         is_pass = (result_key in st.session_state.practice_results and st.session_state.practice_results[result_key]['status'] == 'PASS')
         
         with st.expander(f"Q{idx+1}. {q['ko']}", expanded=not is_pass):
@@ -334,61 +316,53 @@ with tab3:
             with mic_col:
                 audio_val = audio_recorder(text="", key=f"mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
             if audio_val:
-                st.session_state[input_key] = transcribe_audio(audio_val)
-                st.rerun()
+                st.session_state[input_key] = transcribe_audio(audio_val); st.rerun()
 
             with st.form(key=f"form_p_{idx}"):
                 user_val = st.text_input("영어 문장 입력", key=input_key)
-                if st.form_submit_button("제출 및 채점"):
-                    if not user_val.strip(): st.warning("내용을 입력해주세요.")
+                if st.form_submit_button("제출"):
+                    if not user_val.strip(): st.warning("입력해주세요.")
                     else:
                         if user_val.lower().replace(".","").strip() == q['en'].lower().replace(".","").strip():
                             st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
                         else:
-                            with st.spinner("채점 중..."):
-                                feedback_res = evaluate_practice(q['en'], user_val)
-                            if "PASS" in feedback_res: st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
-                            else: st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': feedback_res.replace("FAIL", "").strip()}
+                            with st.spinner("채점 중..."): res = evaluate_practice(q['en'], user_val)
+                            if "PASS" in res: st.session_state.practice_results[result_key] = {'status': 'PASS', 'input': user_val}
+                            else: st.session_state.practice_results[result_key] = {'status': 'FAIL', 'input': user_val, 'feedback': res.replace("FAIL", "").strip()}
             
             if result_key in st.session_state.practice_results:
                 res = st.session_state.practice_results[result_key]
-                if res['status'] == 'PASS': st.success(f"🎉 정답입니다! : {res['input']}")
-                else: st.error("❌ 다시 시도해보세요!"); st.info(f"💡 피드백: {res['feedback']}")
+                if res['status'] == 'PASS': st.success(f"🎉 정답! : {res['input']}")
+                else: st.error("❌ 오답"); st.info(f"피드백: {res['feedback']}")
 
 with tab4:
-    qs = st.session_state.quiz_state
-    words = qs["shuffled_words"]
+    qs = st.session_state.quiz_state; words = qs["shuffled_words"]
     if not words and qs["phase"] == "ready":
-        if st.button("🚀 실전 테스트 시작하기"):
-            qs["shuffled_words"] = random.sample(mission['words'], 20)
-            qs["phase"] = "mc"
-            st.rerun()
+        if st.button("🚀 실전 테스트 시작"):
+            qs["shuffled_words"] = random.sample(mission['words'], 20); qs["phase"] = "mc"; st.rerun()
     elif qs["phase"] == "end":
-        st.balloons()
-        st.success(f"🎉 {qs['loop_count']}회차 학습 완료!")
-        if st.button("학습 종료 및 메인으로"):
+        st.balloons(); st.success(f"🎉 {qs['loop_count']}회차 완료!")
+        if st.button("학습 종료"):
             complete_daily_mission(user_id)
             for key in ["mission", "audio_cache", "quiz_state", "practice_results"]: 
                 if key in st.session_state: del st.session_state[key]
             st.rerun()
     elif words:
-        total = len(words)
-        curr = qs["current_idx"]
-        target = words[curr]
+        total = len(words); curr = qs["current_idx"]; target = words[curr]
         st.progress((curr + 1) / total, text=f"문제 {curr + 1} / {total}")
         if qs["phase"] == "mc":
             st.subheader(f"객관식: {target['en']}")
             if qs["current_options"] is None:
                 opts = [target['ko']]
                 while len(opts) < 4:
-                    r = random.choice(mission['words'])['ko']; 
+                    r = random.choice(mission['words'])['ko']
                     if r not in opts: opts.append(r)
                 random.shuffle(opts); qs["current_options"] = opts
             with st.form(f"quiz_mc_{curr}"):
-                choice = st.radio("알맞은 뜻을 고르세요", qs["current_options"])
+                choice = st.radio("뜻 선택", qs["current_options"])
                 if st.form_submit_button("확인"):
                     if choice == target['ko']: st.success("정답! ⭕")
-                    else: st.error(f"오답! 정답은 '{target['ko']}' 입니다."); save_wrong_word_db(user_id, target)
+                    else: st.error("오답!"); save_wrong_word_db(user_id, target)
                     time.sleep(0.5); qs["current_options"] = None
                     if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
                     else: qs["phase"] = "writing"; qs["current_idx"] = 0; random.shuffle(qs["shuffled_words"]); st.rerun()
@@ -396,12 +370,12 @@ with tab4:
             st.subheader(f"주관식: {target['ko']}")
             set_focus_js()
             with st.form(f"quiz_wr_{curr}", clear_on_submit=True):
-                inp = st.text_input("영어 단어를 입력하세요")
+                inp = st.text_input("영어 단어 입력")
                 if st.form_submit_button("제출"):
                     if inp.strip().lower() == target['en'].lower(): st.success("정답! ⭕")
-                    else: st.error(f"오답! 정답은 '{target['en']}' 입니다."); save_wrong_word_db(user_id, target)
+                    else: st.error("오답!"); save_wrong_word_db(user_id, target)
                     time.sleep(0.5)
                     if curr + 1 < total: qs["current_idx"] += 1; st.rerun()
                     else:
-                        if qs["wrong_words"]: qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("🚨 틀린 문제 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
+                        if qs["wrong_words"]: qs["shuffled_words"] = qs["wrong_words"][:]; qs["wrong_words"] = []; qs["current_idx"] = 0; qs["phase"] = "ready"; qs["loop_count"] += 1; st.warning("오답 재도전!"); time.sleep(1); qs["phase"] = "mc"; st.rerun()
                         else: qs["phase"] = "end"; st.rerun()
