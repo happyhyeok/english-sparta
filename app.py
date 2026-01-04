@@ -134,6 +134,7 @@ def run_level_test_ai(text):
     res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":"Evaluate English level (Low/Mid/High) based on user input."}, {"role":"user", "content":text}])
     return res.choices[0].message.content.strip()
 
+# [수정됨] 문제 출제 로직: "형용사 금지" 및 "1:1 매칭" 강력 규제
 @st.cache_data(show_spinner=False, ttl=3600)
 def generate_curriculum(level, _today_str, user_progress_count):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
@@ -156,10 +157,13 @@ def generate_curriculum(level, _today_str, user_progress_count):
     prompt_text = f"""
     You are an expert English Curriculum Designer for Korean Middle School Grade 1.
     
-    **CRITICAL INSTRUCTION - GRAMMAR:**
-    Today's Fixed Grammar Topic: **"{today_grammar}"**.
-    ALL 'practice_sentences' MUST use this rule.
-    **Keep sentences SIMPLE and SHORT (Max 10 words).** Avoid complex structures.
+    **CRITICAL INSTRUCTION - SENTENCE GENERATION:**
+    1. **NO DECORATIVE ADJECTIVES:** Do NOT add words like 'big', 'fast', 'happy', 'new' unless absolutely necessary for the grammar rule.
+       - ❌ Bad: "Dad drives a big truck." (Where did 'big' come from?)
+       - ✅ Good: "Dad drives a truck."
+    2. **1:1 Match:** The Korean translation MUST match the English sentence exactly word-for-word.
+    3. **Target Grammar:** Use **"{today_grammar}"**.
+    4. **Simplicity:** Keep sentences under 8 words.
     
     **CONTENT GUIDELINES:**
     1. **Target:** CEFR A2-B1 (Middle School).
@@ -173,8 +177,8 @@ def generate_curriculum(level, _today_str, user_progress_count):
         "words": [{{ "en": "...", "ko": "..." }}],
         "practice_sentences": [
             {{ 
-                "ko": "Korean", 
-                "en": "English (Simple, uses {today_grammar})", 
+                "ko": "Korean Translation", 
+                "en": "English Sentence (No hidden adjectives)", 
                 "hint_structure": "Subject + Verb + Object", 
                 "hint_grammar": "Korean Tip" 
             }}
@@ -208,24 +212,21 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-# [핵심 변경] 채점 로직 강화: 정답 문장 구조를 기준으로 엄격하게 채점
+# [수정됨] 채점 로직: 정답에 없는 형용사 강요 금지
 def evaluate_practice(target, user_input):
     prompt = f"""
-    Role: Strict English Grammar Grader for Korean students.
-    Task: Check if the Student Input matches the Target Sentence exactly in meaning and structure.
+    Role: Fair English Grammar Grader for Korean students.
+    Task: Check if the Student Input matches the Target Sentence structure and meaning.
     
     Target: "{target}"
     Input: "{user_input}"
     
-    **STRICT RULES (Do NOT Hallucinate):**
-    1. **NO New Words:** Do NOT suggest adding words (like 'every day', 'at night', 'the') unless they are explicitly present in the 'Target'.
-    2. **Strict Comparison:** Compare input ONLY against the provided 'Target'. If 'Target' is "Mom cooks dinner", then "Mom cooks dinner" is PASS. Do NOT demand "every night".
-    3. **Capitalization:** Check capitalization (e.g. Mom vs mom), but explain gently.
-    4. **Feedback Language:** Korean.
-    
-    **Evaluation Logic:**
-    - If the input matches the Target (ignoring minor punctuation): Output 'PASS'.
-    - If there is a grammar error compared to Target: Output 'FAIL' and explain WHY based *only* on the Target.
+    **Evaluation Rules:**
+    1. **NO HALLUCINATION:** Do NOT penalize the student for missing words (like adjectives 'big', 'new', 'fast') that are NOT present in the 'Target' sentence.
+       - If Target is "Dad drives a truck" and Input is "Dad drives a truck", it is PASS.
+       - If Input is "Dad drives truck", output FAIL and explain "Missing article 'a'".
+    2. **Strict Grammar:** Check Subject-Verb Agreement, Articles (a/an/the), and Word Order.
+    3. **Feedback:** Provide explanation in Korean. Focus ONLY on the grammar rule.
     
     Output Format:
     PASS
@@ -233,7 +234,7 @@ def evaluate_practice(target, user_input):
     FAIL [피드백 내용]
     """
     try:
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.1) # 온도를 더 낮춤 (창의성 억제)
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.1)
         return res.choices[0].message.content
     except Exception as e: return f"FAIL 오류: {str(e)}"
 
