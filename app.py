@@ -48,10 +48,11 @@ client = OpenAI(api_key=openai_api_key)
 supabase: Client = create_client(supabase_url, supabase_key)
 
 # 세션 상태 초기화
-if "user_level" not in st.session_state: st.session_state.user_level = None 
+if "user_info" not in st.session_state: st.session_state.user_info = None 
 if "mission" not in st.session_state: st.session_state.mission = None
 if "audio_cache" not in st.session_state: st.session_state.audio_cache = {}
 if "practice_results" not in st.session_state: st.session_state.practice_results = {}
+if "last_processed_audio" not in st.session_state: st.session_state.last_processed_audio = {} 
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
         "phase": "ready", "current_idx": 0, "shuffled_words": [], 
@@ -61,7 +62,7 @@ if "quiz_state" not in st.session_state:
 # ==========================================
 # 2. DB 및 유틸리티 함수
 # ==========================================
-def get_user_data(user_id):
+def fetch_user_from_db(user_id):
     response = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if response.data: return response.data[0]
     return None
@@ -70,27 +71,40 @@ def create_new_user(user_id):
     data = { "user_id": user_id, "current_level": None, "total_complete_count": 0, "last_test_count": 0, "streak": 0, "last_visit_date": None }
     supabase.table("users").insert(data).execute()
 
-def update_attendance(user_id):
-    user = get_user_data(user_id)
+def login_and_update_attendance(user_id):
+    if st.session_state.user_info and st.session_state.user_info['user_id'] == user_id:
+        return st.session_state.user_info['streak']
+
+    user = fetch_user_from_db(user_id)
     if not user:
         create_new_user(user_id)
-        user = get_user_data(user_id)
+        user = fetch_user_from_db(user_id)
+    
     today_str = date.today().isoformat()
     last_visit = user.get("last_visit_date")
     streak = user.get("streak", 0)
+    
     if last_visit != today_str:
         if last_visit:
             delta = (date.today() - datetime.date.fromisoformat(last_visit)).days
             streak = streak + 1 if delta == 1 else 1
-        else: streak = 1
+        else: 
+            streak = 1
+        
         supabase.table("users").update({ "last_visit_date": today_str, "streak": streak }).eq("user_id", user_id).execute()
+        user = fetch_user_from_db(user_id)
+
+    st.session_state.user_info = user
     return streak
 
 def complete_daily_mission(user_id):
-    user = get_user_data(user_id)
+    user = fetch_user_from_db(user_id)
     new_cnt = user.get("total_complete_count", 0) + 1
     supabase.table("users").update({"total_complete_count": new_cnt}).eq("user_id", user_id).execute()
     supabase.table("study_logs").insert({ "user_id": user_id, "study_date": date.today().isoformat(), "completed_at": datetime.datetime.now().isoformat() }).execute()
+    
+    if st.session_state.user_info:
+        st.session_state.user_info['total_complete_count'] = new_cnt
 
 def save_wrong_word_db(user_id, word_obj):
     res = supabase.table("wrong_words").select("*").eq("user_id", user_id).eq("word", word_obj['en']).execute()
@@ -100,8 +114,10 @@ def save_wrong_word_db(user_id, word_obj):
         supabase.table("wrong_words").insert({ "user_id": user_id, "word": word_obj['en'], "meaning": word_obj['ko'], "wrong_count": 1 }).execute()
 
 def update_level_and_test_log(user_id, new_level):
-    cnt = get_user_data(user_id).get("total_complete_count", 0)
+    cnt = st.session_state.user_info.get("total_complete_count", 0)
     supabase.table("users").update({ "current_level": new_level, "last_test_count": cnt }).eq("user_id", user_id).execute()
+    st.session_state.user_info['current_level'] = new_level
+    st.session_state.user_info['last_test_count'] = cnt
 
 def get_audio_bytes(text):
     if text in st.session_state.audio_cache: return st.session_state.audio_cache[text]
@@ -123,7 +139,6 @@ def generate_curriculum(level, _today_str, user_progress_count):
     model_candidates = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-exp"]
     headers = {'Content-Type': 'application/json'}
     
-    # 중1 표준 문법 실라버스
     grammar_syllabus = [
         "Be동사의 현재형 (am, are, is)", "일반동사의 현재형 (3인칭 단수 s/es)", "명사와 관사 (a/an, the, 복수형 s)",
         "대명사 (주격, 소유격, 목적격)", "형용사와 부사의 역할", "Be동사의 부정문과 의문문",
@@ -144,8 +159,13 @@ def generate_curriculum(level, _today_str, user_progress_count):
     **CRITICAL INSTRUCTION - GRAMMAR:**
     Today's Fixed Grammar Topic: **"{today_grammar}"**.
     ALL 'practice_sentences' MUST use this rule.
-    **Keep sentences SIMPLE and SHORT (Max 10 words).** Avoid complex structures like relative clauses or participle phrases unless it is the target grammar.
+    **Keep sentences SIMPLE and SHORT (Max 10 words).** Avoid complex structures.
     
+    **CONTENT GUIDELINES:**
+    1. **Target:** CEFR A2-B1 (Middle School).
+    2. **Mix:** 30% Easy, 50% Medium (Core), 20% Challenge.
+    3. **Topic:** {today_topic_hint}.
+
     Output JSON Schema:
     {{
         "topic": "Topic Name ({today_topic_hint})",
@@ -188,26 +208,24 @@ def transcribe_audio(audio_bytes):
     f.name = "input.wav"
     return client.audio.transcriptions.create(model="whisper-1", file=f).text
 
-# [핵심 변경] 채점 로직 강화: 정답 문장 구조를 기준으로 피드백 생성
+# [핵심 변경] 채점 로직 강화: 정답 문장 구조를 기준으로 엄격하게 채점
 def evaluate_practice(target, user_input):
     prompt = f"""
-    Role: Precise English Grammar Teacher for Korean Middle Schoolers.
-    Task: Compare the Student Input against the Target Sentence to find errors.
+    Role: Strict English Grammar Grader for Korean students.
+    Task: Check if the Student Input matches the Target Sentence exactly in meaning and structure.
     
-    Target Sentence: "{target}"
-    Student Input: "{user_input}"
+    Target: "{target}"
+    Input: "{user_input}"
     
-    **Analysis Steps (Thinking Process):**
-    1. Identify the Main Verb and Sentence Structure of the **TARGET** sentence first.
-    2. Check if the Student used the correct Subject and Verb.
-    3. Check the Object/Complement order based on the TARGET.
-    4. **CRITICAL:** Explain errors based on the TARGET's correct structure. Do not invent new rules.
-       - If user put 'have a career' at the end, but Target has it in the middle, say: "In the correct sentence, 'have a career' comes after 'going to' because..."
+    **STRICT RULES (Do NOT Hallucinate):**
+    1. **NO New Words:** Do NOT suggest adding words (like 'every day', 'at night', 'the') unless they are explicitly present in the 'Target'.
+    2. **Strict Comparison:** Compare input ONLY against the provided 'Target'. If 'Target' is "Mom cooks dinner", then "Mom cooks dinner" is PASS. Do NOT demand "every night".
+    3. **Capitalization:** Check capitalization (e.g. Mom vs mom), but explain gently.
+    4. **Feedback Language:** Korean.
     
-    **Output Guidelines:**
-    - Language: Korean ONLY.
-    - If meaning is correct (minor typo ok): Output 'PASS'.
-    - If incorrect: Output 'FAIL' followed by specific feedback.
+    **Evaluation Logic:**
+    - If the input matches the Target (ignoring minor punctuation): Output 'PASS'.
+    - If there is a grammar error compared to Target: Output 'FAIL' and explain WHY based *only* on the Target.
     
     Output Format:
     PASS
@@ -215,12 +233,12 @@ def evaluate_practice(target, user_input):
     FAIL [피드백 내용]
     """
     try:
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.2)
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"system", "content":prompt}], temperature=0.1) # 온도를 더 낮춤 (창의성 억제)
         return res.choices[0].message.content
     except Exception as e: return f"FAIL 오류: {str(e)}"
 
 # ==========================================
-# 3. 메인 화면
+# 3. 메인 화면 로직
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 설정")
@@ -237,10 +255,12 @@ with st.sidebar:
 
 if not user_id: st.warning("아이디를 입력하세요."); st.stop()
 
-streak = update_attendance(user_id)
-user_data = get_user_data(user_id)
+streak = login_and_update_attendance(user_id)
+user_data = st.session_state.user_info 
+
 current_level = user_data.get('current_level')
 total_complete = user_data.get('total_complete_count', 0)
+last_test_cnt = user_data.get('last_test_count', 0)
 
 st.title("🏫 AI 중학 영어 스파르타")
 col1, col2, col3 = st.columns(3)
@@ -253,10 +273,17 @@ if current_level is None:
     st.subheader("📝 레벨 테스트"); st.write("Q. What do you usually do on weekends?")
     aud = audio_recorder(text="", key="lvl_rec", neutral_color="#6aa36f", recording_color="#e8b62c")
     if aud:
-        txt = transcribe_audio(aud); st.write(f"답변: {txt}")
-        if len(txt) > 1:
-            lvl = run_level_test_ai(txt); update_level_and_test_log(user_id, lvl)
-            st.success(f"완료: {lvl}"); time.sleep(1.5); st.rerun()
+        aud_hash = hash(aud)
+        if "lvl_test_audio" not in st.session_state or st.session_state.lvl_test_audio != aud_hash:
+            txt = transcribe_audio(aud)
+            st.session_state.lvl_test_audio = aud_hash
+            st.write(f"답변: {txt}")
+            if len(txt) > 1:
+                lvl = run_level_test_ai(txt)
+                update_level_and_test_log(user_id, lvl)
+                st.success(f"완료: {lvl}")
+                time.sleep(1.5)
+                st.rerun()
     st.stop()
 
 if not st.session_state.mission:
@@ -311,8 +338,14 @@ with tab3:
             mic_col, _ = st.columns([1, 5])
             with mic_col:
                 audio_val = audio_recorder(text="", key=f"mic_{idx}", icon_size="lg", neutral_color="#6aa36f", recording_color="#e8b62c")
+            
             if audio_val:
-                st.session_state[input_key] = transcribe_audio(audio_val); st.rerun()
+                current_audio_hash = hash(audio_val)
+                prev_audio_key = f"prev_audio_{idx}"
+                if prev_audio_key not in st.session_state.last_processed_audio or st.session_state.last_processed_audio[prev_audio_key] != current_audio_hash:
+                    st.session_state[input_key] = transcribe_audio(audio_val)
+                    st.session_state.last_processed_audio[prev_audio_key] = current_audio_hash 
+                    st.rerun()
 
             with st.form(key=f"form_p_{idx}"):
                 user_val = st.text_input("영어 문장 입력", key=input_key)
@@ -340,7 +373,7 @@ with tab4:
         st.balloons(); st.success(f"🎉 {qs['loop_count']}회차 완료!")
         if st.button("학습 종료"):
             complete_daily_mission(user_id)
-            for key in ["mission", "audio_cache", "quiz_state", "practice_results"]: 
+            for key in ["mission", "audio_cache", "quiz_state", "practice_results", "last_processed_audio"]: 
                 if key in st.session_state: del st.session_state[key]
             st.rerun()
     elif words:
